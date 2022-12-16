@@ -10,12 +10,12 @@
 
 {% block login %}
 <div id="login-main" class="container">
+  <h1 class="sr-only">Login page</h1>
 {% block login_container %}
 {% if custom_html %}
 {{ custom_html | safe }}
 {% elif login_service %}
 <div class="service-login">
-  <h1 class="sr-only">Login page</h1>
   <p id='insecure-login-warning' class='hidden'>
   Warning: JupyterHub seems to be served over an unsecured HTTP connection.
   We strongly recommend enabling HTTPS for JupyterHub.
@@ -27,8 +27,8 @@
 </div>
 {% else %}
 <form action="{{authenticator_login_url}}" method="post" role="form">
-  <div class="auth-form-header"> <!--This was just a div. I introduced a h1 tag and reduced the size to fit the style-->
-    <h1 style="font-size:1.3em;">Sign in</h1>
+  <div class="auth-form-header">
+    Sign in
   </div>
   <div class='auth-form-body'>
 
