@@ -10,7 +10,7 @@
 
 {% block login %}
 <div id="login-main" class="container">
-  <h1 class="sr-only">Login page</h1>
+  <!--<h1 class="sr-only">Login page</h1>-->
 {% block login_container %}
 {% if custom_html %}
 {{ custom_html | safe }}
@@ -28,7 +28,7 @@
 {% else %}
 <form action="{{authenticator_login_url}}" method="post" role="form">
   <div class="auth-form-header">
-    Sign in
+    <h1>Sign in</h1>
   </div>
   <div class='auth-form-body'>
 
