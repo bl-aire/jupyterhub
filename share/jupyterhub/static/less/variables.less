@@ -4,8 +4,11 @@
 @navbar-height: 40px;
 @grid-float-breakpoint: @screen-xs-min;
 
-@navbar-default-link-color: #222;
-@navbar-default-link-hover-color: #777;
+@navbar-default-color: #222;
+@navbar-default-link-color: @navbar-default-color;
+// darken background on hover, no change to text
+@navbar-default-link-hover-color: @navbar-default-color;
+@navbar-default-link-hover-bg: darken(@navbar-default-bg, 10%);
 
 @jupyter-orange: #f37524;
 
