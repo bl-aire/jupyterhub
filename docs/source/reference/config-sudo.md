@@ -6,14 +6,14 @@ Only do this if you are very sure you must.
 
 ## Overview
 
-There are many Authenticators and Spawners available for JupyterHub. Some, such
-as DockerSpawner or OAuthenticator, do not need any elevated permissions. This
+There are many [Authenticators](../getting-started/authenticators-users-basics) and [Spawners](../getting-started/spawners-basics) available for JupyterHub. Some, such
+as [DockerSpawner](https://github.com/jupyterhub/dockerspawner) or [OAuthenticator](https://github.com/jupyterhub/oauthenticator), do not need any elevated permissions. This
 document describes how to get the full default behavior of JupyterHub while
-running notebook servers as real system users on a shared system without
+running notebook servers as real system users on a shared system, without
 running the Hub itself as root.
 
 Since JupyterHub needs to spawn processes as other users, the simplest way
-is to run it as root, spawning user servers with [setuid](http://linux.die.net/man/2/setuid).
+is to run it as root, spawning user servers with [setuid](https://linux.die.net/man/2/setuid).
 But this isn't especially safe, because you have a process running on the
 public web as root.
 
@@ -69,7 +69,8 @@ Cmnd_Alias JUPYTER_CMD = /usr/local/bin/sudospawner
 rhea ALL=(JUPYTER_USERS) NOPASSWD:JUPYTER_CMD
 ```
 
-It might be useful to modify `secure_path` to add commands in path.
+It might be useful to modify `secure_path` to add commands in path. (Search for
+`secure_path` in the [sudo docs](https://www.sudo.ws/man/1.8.14/sudoers.man.html)
 
 As an alternative to adding every user to the `/etc/sudoers` file, you can
 use a group in the last line above, instead of `JUPYTER_USERS`:
@@ -90,7 +91,7 @@ $ adduser -G jupyterhub newuser
 Test that the new user doesn't need to enter a password to run the sudospawner
 command.
 
-This should prompt for your password to switch to rhea, but _not_ prompt for
+This should prompt for your password to switch to `rhea`, but _not_ prompt for
 any password for the second switch. It should show some help output about
 logging options:
 
@@ -113,13 +114,13 @@ sudo: a password is required
 
 ## Enable PAM for non-root
 
-By default, [PAM authentication](http://en.wikipedia.org/wiki/Pluggable_authentication_module)
+By default, [PAM authentication](https://en.wikipedia.org/wiki/Pluggable_authentication_module)
 is used by JupyterHub. To use PAM, the process may need to be able to read
 the shadow password database.
 
 ### Shadow group (Linux)
 
-**Note:** On Fedora based distributions there is no clear way to configure
+**Note:** On [Fedora based distributions](https://fedoraproject.org/wiki/List_of_Fedora_remixes) there is no clear way to configure
 the PAM database to allow sufficient access for authenticating with the target user's password
 from JupyterHub. As a workaround we recommend use an
 [alternative authentication method](https://github.com/jupyterhub/jupyterhub/wiki/Authenticators).
@@ -150,7 +151,7 @@ We want our new user to be able to read the shadow passwords, so add it to the s
     $ sudo usermod -a -G shadow rhea
 ```
 
-If you want jupyterhub to serve pages on a restricted port (such as port 80 for http),
+If you want jupyterhub to serve pages on a restricted port (such as port 80 for HTTP),
 then you will need to give `node` permission to do so:
 
 ```bash
@@ -158,16 +159,18 @@ sudo setcap 'cap_net_bind_service=+ep' /usr/bin/node
 ```
 
 However, you may want to further understand the consequences of this.
+([Further reading](https://man7.org/linux/man-pages/man7/capabilities.7.html))
 
 You may also be interested in limiting the amount of CPU any process can use
 on your server. `cpulimit` is a useful tool that is available for many Linux
 distributions' packaging system. This can be used to keep any user's process
 from using too much CPU cycles. You can configure it accoring to [these
-instructions](http://ubuntuforums.org/showthread.php?t=992706).
+instructions](https://ubuntuforums.org/showthread.php?t=992706).
 
 ### Shadow group (FreeBSD)
 
-**NOTE:** This has not been tested and may not work as expected.
+**NOTE:** This has not been tested on FreeBSD and may not work as expected on
+the FreeBSD platform. _Do not use in production without verifying that it works properly!_
 
 ```bash
 $ ls -l /etc/spwd.db /etc/master.passwd
@@ -225,8 +228,8 @@ And try logging in.
 
 ## Troubleshooting: SELinux
 
-If you still get a generic `Permission denied` `PermissionError`, it's possible SELinux is blocking you.  
-Here's how you can make a module to allow this.
+If you still get a generic `Permission denied` `PermissionError`, it's possible SELinux is blocking you.
+Here's how you can make a module to resolve this.
 First, put this in a file named `sudo_exec_selinux.te`:
 
 ```bash
@@ -253,6 +256,6 @@ $ semodule -i sudo_exec_selinux.pp
 ## Troubleshooting: PAM session errors
 
 If the PAM authentication doesn't work and you see errors for
-`login:session-auth`, or similar, considering updating to a more recent version
+`login:session-auth`, or similar, consider updating to a more recent version
 of jupyterhub and disabling the opening of PAM sessions with
 `c.PAMAuthenticator.open_sessions=False`.
