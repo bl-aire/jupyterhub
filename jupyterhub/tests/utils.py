@@ -6,6 +6,8 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 import requests
 from certipy import Certipy
+from sqlalchemy import text
+from tornado.httputil import url_concat
 
 from jupyterhub import metrics, orm
 from jupyterhub.objects import Server
@@ -39,6 +41,13 @@ async_requests = _AsyncRequests()
 
 class AsyncSession(requests.Session):
     """requests.Session object that runs in the background thread"""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # session requests are for cookie authentication
+        # and should look like regular page views,
+        # so set Sec-Fetch-Mode: navigate
+        self.headers.setdefault("Sec-Fetch-Mode", "navigate")
 
     def request(self, *args, **kwargs):
         return async_requests.executor.submit(super().request, *args, **kwargs)
@@ -84,8 +93,8 @@ def check_db_locks(func):
         def _check(_=None):
             temp_session = app.session_factory()
             try:
-                temp_session.execute('CREATE TABLE dummy (foo INT)')
-                temp_session.execute('DROP TABLE dummy')
+                temp_session.execute(text('CREATE TABLE dummy (foo INT)'))
+                temp_session.execute(text('DROP TABLE dummy'))
             finally:
                 temp_session.close()
 
@@ -155,25 +164,27 @@ async def api_request(
     else:
         base_url = public_url(app, path='hub')
     headers = kwargs.setdefault('headers', {})
+    headers.setdefault("Sec-Fetch-Mode", "cors")
     if 'Authorization' not in headers and not noauth and 'cookies' not in kwargs:
         # make a copy to avoid modifying arg in-place
         kwargs['headers'] = h = {}
         h.update(headers)
         h.update(auth_header(app.db, kwargs.pop('name', 'admin')))
 
+    url = ujoin(base_url, 'api', *api_path)
+
     if 'cookies' in kwargs:
         # for cookie-authenticated requests,
-        # set Referer so it looks like the request originated
-        # from a Hub-served page
-        headers.setdefault('Referer', ujoin(base_url, 'test'))
+        # add _xsrf to url params
+        if "_xsrf" in kwargs['cookies'] and not noauth:
+            url = url_concat(url, {"_xsrf": kwargs['cookies']['_xsrf']})
 
-    url = ujoin(base_url, 'api', *api_path)
     f = getattr(async_requests, method)
     if app.internal_ssl:
         kwargs['cert'] = (app.internal_ssl_cert, app.internal_ssl_key)
         kwargs["verify"] = app.internal_ssl_ca
     resp = await f(url, **kwargs)
-    assert "frame-ancestors 'self'" in resp.headers['Content-Security-Policy']
+    assert "frame-ancestors 'none'" in resp.headers['Content-Security-Policy']
     assert (
         ujoin(app.hub.base_url, "security/csp-report")
         in resp.headers['Content-Security-Policy']
@@ -194,6 +205,9 @@ def get_page(path, app, hub=True, **kw):
     else:
         prefix = app.base_url
     base_url = ujoin(public_host(app), prefix)
+    # Sec-Fetch-Mode=navigate to look like a regular page view
+    headers = kw.setdefault("headers", {})
+    headers.setdefault("Sec-Fetch-Mode", "navigate")
     return async_requests.get(ujoin(base_url, path), **kw)
 
 

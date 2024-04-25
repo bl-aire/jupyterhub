@@ -1,13 +1,16 @@
 """User handlers"""
+
 # Copyright (c) Jupyter Development Team.
 # Distributed under the terms of the Modified BSD License.
 import asyncio
+import inspect
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta, timezone
 
 from async_generator import aclosing
 from dateutil.parser import parse as parse_date
 from sqlalchemy import func, or_
+from sqlalchemy.orm import joinedload, raiseload, selectinload  # noqa
 from tornado import web
 from tornado.iostream import StreamClosedError
 
@@ -21,6 +24,7 @@ from ..utils import (
     maybe_future,
     url_escape_path,
     url_path_join,
+    utcnow,
 )
 from .base import APIHandler
 
@@ -59,10 +63,13 @@ class SelfAPIHandler(APIHandler):
 
         # add session_id associated with token
         # added in 2.0
+        # token_id added in 5.0
         token = self.get_token()
         if token:
+            model["token_id"] = token.api_id
             model["session_id"] = token.session_id
         else:
+            model["token_id"] = None
             model["session_id"] = None
 
         # add scopes to identify model,
@@ -84,10 +91,38 @@ class UserListAPIHandler(APIHandler):
     def get(self):
         state_filter = self.get_argument("state", None)
         name_filter = self.get_argument("name_filter", None)
+        sort = sort_by_param = self.get_argument("sort", "id")
+        sort_direction = "asc"
+        if sort[:1] == '-':
+            sort_direction = "desc"
+            sort = sort[1:]
+
         offset, limit = self.get_api_pagination()
+
+        if sort in {"id", "name", "last_activity"}:
+            sort_column = getattr(orm.User, sort)
+        else:
+            raise web.HTTPError(
+                400,
+                f"sort must be 'id', 'name', or 'last_activity', not '{sort_by_param}'",
+            )
+
+        # NULL is sorted inconsistently, so make it explicit
+        if sort_direction == "asc":
+            sort_order = (sort_column.is_not(None), sort_column.asc())
+        elif sort_direction == "desc":
+            sort_order = (sort_column.is_(None), sort_column.desc())
+        else:
+            # this can't happen, users don't specify direction
+            raise ValueError(
+                f"sort_direction must be 'asc' or 'desc', got '{sort_direction}'"
+            )
 
         # post_filter
         post_filter = None
+
+        # starting query
+        query = self.db.query(orm.User)
 
         if state_filter in {"active", "ready"}:
             # only get users with active servers
@@ -96,11 +131,13 @@ class UserListAPIHandler(APIHandler):
             # it may still be in a pending start/stop state.
             # join filters out users with no Spawners
             query = (
-                self.db.query(orm.User)
+                query
                 # join filters out any Users with no Spawners
-                .join(orm.Spawner)
+                .join(orm.Spawner, orm.User._orm_spawners)
                 # this implicitly gets Users with *any* active server
                 .filter(orm.Spawner.server != None)
+                # group-by ensures the count is correct
+                .group_by(orm.User.id)
             )
             if state_filter == "ready":
                 # have to post-process query results because active vs ready
@@ -113,17 +150,24 @@ class UserListAPIHandler(APIHandler):
             # this is the complement to the above query.
             # how expensive is this with lots of servers?
             query = (
-                self.db.query(orm.User)
-                .outerjoin(orm.Spawner)
-                .outerjoin(orm.Server)
+                query.outerjoin(orm.Spawner, orm.User._orm_spawners)
+                .outerjoin(orm.Server, orm.Spawner.server)
                 .group_by(orm.User.id)
                 .having(func.count(orm.Server.id) == 0)
             )
         elif state_filter:
             raise web.HTTPError(400, "Unrecognized state filter: %r" % state_filter)
-        else:
-            # no filter, return all users
-            query = self.db.query(orm.User)
+
+        # apply eager load options
+        query = query.options(
+            selectinload(orm.User.roles),
+            selectinload(orm.User.groups),
+            joinedload(orm.User._orm_spawners).joinedload(orm.Spawner.user),
+            # raiseload here helps us make sure we've loaded everything in one query
+            # but since we share a single db session, we can't do this for real
+            # but it's useful in testing
+            # raiseload("*"),
+        )
 
         sub_scope = self.parsed_scopes['list:users']
         if sub_scope != scopes.Scope.ALL:
@@ -152,7 +196,7 @@ class UserListAPIHandler(APIHandler):
             query = query.filter(orm.User.name.ilike(f'%{name_filter}%'))
 
         full_query = query
-        query = query.order_by(orm.User.id.asc()).offset(offset).limit(limit)
+        query = query.order_by(*sort_order).offset(offset).limit(limit)
 
         user_list = []
         for u in query:
@@ -173,6 +217,8 @@ class UserListAPIHandler(APIHandler):
             data = user_list
 
         self.write(json.dumps(data))
+        # if testing with raiselaod above, need expire_all to avoid affecting other operations
+        # self.db.expire_all()
 
     @needs_scope('admin:users')
     async def post(self):
@@ -337,6 +383,15 @@ class UserAPIHandler(APIHandler):
 class UserTokenListAPIHandler(APIHandler):
     """API endpoint for listing/creating tokens"""
 
+    # defer check_xsrf_cookie so we can accept auth
+    # in the `auth` request field, which shouldn't require xsrf cookies
+    _skip_post_check_xsrf = True
+
+    def check_xsrf_cookie(self):
+        if self.request.method == 'POST' and self._skip_post_check_xsrf:
+            return
+        return super().check_xsrf_cookie()
+
     @needs_scope('read:tokens')
     def get(self, user_name):
         """Get tokens for a given user"""
@@ -344,7 +399,7 @@ class UserTokenListAPIHandler(APIHandler):
         if not user:
             raise web.HTTPError(404, "No such user: %s" % user_name)
 
-        now = datetime.utcnow()
+        now = utcnow(with_tz=False)
         api_tokens = []
 
         def sort_key(token):
@@ -374,6 +429,7 @@ class UserTokenListAPIHandler(APIHandler):
                 if isinstance(name, dict):
                     # not a simple string so it has to be a dict
                     name = name.get('name')
+                # don't check xsrf if we've authenticated via the request body
             except web.HTTPError as e:
                 # turn any authentication error into 403
                 raise web.HTTPError(403)
@@ -384,7 +440,14 @@ class UserTokenListAPIHandler(APIHandler):
                     "Error authenticating request for %s: %s", self.request.uri, e
                 )
                 raise web.HTTPError(403)
+            if name is None:
+                raise web.HTTPError(403)
             requester = self.find_user(name)
+        else:
+            # perform delayed xsrf check
+            # if we aren't authenticating via the request body
+            self._skip_post_check_xsrf = False
+            self.check_xsrf_cookie()
         if requester is None:
             # couldn't identify requester
             raise web.HTTPError(403)
@@ -408,6 +471,18 @@ class UserTokenListAPIHandler(APIHandler):
         token_roles = body.get("roles")
         token_scopes = body.get("scopes")
 
+        # check type of permissions
+        for key in ("roles", "scopes"):
+            value = body.get(key)
+            if value is None:
+                continue
+            if not isinstance(value, list) or not all(
+                isinstance(item, str) for item in value
+            ):
+                raise web.HTTPError(
+                    400, f"token {key} must be null or a list of strings, not {value!r}"
+                )
+
         try:
             api_token = user.new_api_token(
                 note=note,
@@ -415,7 +490,7 @@ class UserTokenListAPIHandler(APIHandler):
                 roles=token_roles,
                 scopes=token_scopes,
             )
-        except ValueError as e:
+        except (ValueError, KeyError) as e:
             raise web.HTTPError(400, str(e))
         if requester is not user:
             self.log.info(
@@ -428,7 +503,14 @@ class UserTokenListAPIHandler(APIHandler):
             user_kind = 'user' if isinstance(user, User) else 'service'
             self.log.info("%s %s requested new API token", user_kind.title(), user.name)
         # retrieve the model
-        token_model = self.token_model(orm.APIToken.find(self.db, api_token))
+        orm_token = orm.APIToken.find(self.db, api_token)
+        if orm_token is None:
+            self.log.error(
+                "Failed to find token after creating it: %r. Maybe it expired already?",
+                body,
+            )
+            raise web.HTTPError(500, "Failed to create token")
+        token_model = self.token_model(orm_token)
         token_model['token'] = api_token
         self.write(json.dumps(token_model))
         self.set_status(201)
@@ -454,7 +536,7 @@ class UserTokenAPIHandler(APIHandler):
 
         orm_token = self.db.query(orm.APIToken).filter_by(id=id_).first()
         if orm_token is None or orm_token.user is not user.orm_user:
-            raise web.HTTPError(404, "Token not found %s", orm_token)
+            raise web.HTTPError(404, not_found)
         return orm_token
 
     @needs_scope('read:tokens')
@@ -462,7 +544,7 @@ class UserTokenAPIHandler(APIHandler):
         """"""
         user = self.find_user(user_name)
         if not user:
-            raise web.HTTPError(404, "No such user: %s" % user_name)
+            raise web.HTTPError(404, f"No such user: {user_name}")
         token = self.find_token_by_id(user, token_id)
         self.write(json.dumps(self.token_model(token)))
 
@@ -471,7 +553,7 @@ class UserTokenAPIHandler(APIHandler):
         """Delete a token"""
         user = self.find_user(user_name)
         if not user:
-            raise web.HTTPError(404, "No such user: %s" % user_name)
+            raise web.HTTPError(404, f"No such user: {user_name}")
         token = self.find_token_by_id(user, token_id)
         # deleting an oauth token deletes *all* oauth tokens for that client
         client_id = token.client_id
@@ -479,7 +561,11 @@ class UserTokenAPIHandler(APIHandler):
             tokens = [
                 token for token in user.api_tokens if token.client_id == client_id
             ]
+            self.log.info(
+                f"Deleting {len(tokens)} tokens for {user_name} issued by {token.client_id}"
+            )
         else:
+            self.log.info(f"Deleting token {token_id} for {user_name}")
             tokens = [token]
         for token in tokens:
             self.db.delete(token)
@@ -512,10 +598,8 @@ class UserServerAPIHandler(APIHandler):
                 if named_server_limit_per_user <= len(named_spawners):
                     raise web.HTTPError(
                         400,
-                        "User {} already has the maximum of {} named servers."
-                        "  One must be deleted before a new server can be created".format(
-                            user_name, named_server_limit_per_user
-                        ),
+                        f"User {user_name} already has the maximum of {named_server_limit_per_user} named servers."
+                        "  One must be deleted before a new server can be created",
                     )
         spawner = user.get_spawner(server_name, replace_failed=True)
         pending = spawner.pending
@@ -693,19 +777,32 @@ class SpawnProgressAPIHandler(APIHandler):
         # - spawner not running at all
         # - spawner failed
         # - spawner pending start (what we expect)
-        url = url_path_join(user.url, url_escape_path(server_name), '/')
-        ready_event = {
-            'progress': 100,
-            'ready': True,
-            'message': f"Server ready at {url}",
-            'html_message': 'Server ready at <a href="{0}">{0}</a>'.format(url),
-            'url': url,
-        }
         failed_event = {'progress': 100, 'failed': True, 'message': "Spawn failed"}
+
+        async def get_ready_event():
+            url = url_path_join(user.url, url_escape_path(server_name), '/')
+            ready_event = {
+                'progress': 100,
+                'ready': True,
+                'message': f"Server ready at {url}",
+                'html_message': f'Server ready at <a href="{url}">{url}</a>',
+                'url': url,
+            }
+            original_ready_event = ready_event.copy()
+            if spawner.progress_ready_hook:
+                try:
+                    ready_event = spawner.progress_ready_hook(spawner, ready_event)
+                    if inspect.isawaitable(ready_event):
+                        ready_event = await ready_event
+                except Exception as e:
+                    self.log.exception(f"Error in ready_event hook: {e}")
+                    ready_event = original_ready_event
+            return ready_event
 
         if spawner.ready:
             # spawner already ready. Trigger progress-completion immediately
             self.log.info("Server %s is already started", spawner._log_name)
+            ready_event = await get_ready_event()
             await self.send_event(ready_event)
             return
 
@@ -749,6 +846,7 @@ class SpawnProgressAPIHandler(APIHandler):
         if spawner.ready:
             # spawner is ready, signal completion and redirect
             self.log.info("Server %s is ready", spawner._log_name)
+            ready_event = await get_ready_event()
             await self.send_event(ready_event)
         else:
             # what happened? Maybe spawn failed?
@@ -782,13 +880,11 @@ def _parse_timestamp(timestamp):
         # strip timezone info to naive UTC datetime
         dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
 
-    now = datetime.utcnow()
+    now = utcnow(with_tz=False)
     if (dt - now) > timedelta(minutes=59):
         raise web.HTTPError(
             400,
-            "Rejecting activity from more than an hour in the future: {}".format(
-                isoformat(dt)
-            ),
+            f"Rejecting activity from more than an hour in the future: {isoformat(dt)}",
         )
     return dt
 

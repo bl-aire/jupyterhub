@@ -12,18 +12,18 @@ development.
 ### Install Python
 
 JupyterHub is written in the [Python](https://python.org) programming language and
-requires you have at least version 3.6 installed locally. If you haven’t
+requires you have at least version {{python_min}} installed locally. If you haven’t
 installed Python before, the recommended way to install it is to use
 [Miniforge](https://github.com/conda-forge/miniforge#download).
 
 ### Install nodejs
 
-[NodeJS 12+](https://nodejs.org/en/) is required for building some JavaScript components.
+[NodeJS {{node_min}}+](https://nodejs.org/en/) is required for building some JavaScript components.
 `configurable-http-proxy`, the default proxy implementation for JupyterHub, is written in Javascript.
 If you have not installed NodeJS before, we recommend installing it in the `miniconda` environment you set up for Python.
 You can do so with `conda install nodejs`.
 
-Many in the Jupyter community use \[`nvm`\](<https://github.com/nvm-sh/nvm>) to
+Many in the Jupyter community use [`nvm`](https://github.com/nvm-sh/nvm) to
 managing node dependencies.
 
 ### Install git
@@ -59,7 +59,7 @@ a more detailed discussion.
    python -V
    ```
 
-   This should return a version number greater than or equal to 3.6.
+   This should return a version number greater than or equal to {{python_min}}.
 
    ```bash
    npm -v
@@ -67,10 +67,10 @@ a more detailed discussion.
 
    This should return a version number greater than or equal to 5.0.
 
-3. Install `configurable-http-proxy` (required to run and test the default JupyterHub configuration) and `yarn` (required to build some components):
+3. Install `configurable-http-proxy` (required to run and test the default JupyterHub configuration):
 
    ```bash
-   npm install -g configurable-http-proxy yarn
+   npm install -g configurable-http-proxy
    ```
 
    If you get an error that says `Error: EACCES: permission denied`, you might need to prefix the command with `sudo`.
@@ -78,7 +78,7 @@ a more detailed discussion.
    If you do not have access to sudo, you may instead run the following commands:
 
    ```bash
-   npm install configurable-http-proxy yarn
+   npm install configurable-http-proxy
    export PATH=$PATH:$(pwd)/node_modules/.bin
    ```
 
@@ -87,7 +87,7 @@ a more detailed discussion.
    If you are using conda you can instead run:
 
    ```bash
-   conda install configurable-http-proxy yarn
+   conda install configurable-http-proxy
    ```
 
 4. Install an editable version of JupyterHub and its requirements for
@@ -98,20 +98,13 @@ a more detailed discussion.
    python3 -m pip install --editable ".[test]"
    ```
 
-5. Set up a database.
-
-   The default database engine is `sqlite` so if you are just trying
-   to get up and running quickly for local development that should be
-   available via [Python](https://docs.python.org/3.5/library/sqlite3.html).
-   See {doc}`/reference/database` for details on other supported databases.
-
-6. You are now ready to start JupyterHub!
+5. You are now ready to start JupyterHub!
 
    ```bash
    jupyterhub
    ```
 
-7. You can access JupyterHub from your browser at
+6. You can access JupyterHub from your browser at
    `http://localhost:8000` now.
 
 Happy developing!
@@ -130,8 +123,16 @@ configuration:
 jupyterhub -f testing/jupyterhub_config.py
 ```
 
-The default JupyterHub [authenticator](https://jupyterhub.readthedocs.io/en/stable/reference/authenticators.html#the-default-pam-authenticator)
-& [spawner](https://jupyterhub.readthedocs.io/en/stable/api/spawner.html#localprocessspawner)
+The test configuration enables a few things to make testing easier:
+
+- use 'dummy' authentication and 'simple' spawner
+- named servers are enabled
+- listen only on localhost
+- 'admin' is an admin user, if you want to test the admin page
+- disable caching of static files
+
+The default JupyterHub [authenticator](PAMAuthenticator)
+& [spawner](LocalProcessSpawner)
 require your system to have user accounts for each user you want to log in to
 JupyterHub as.
 
@@ -145,6 +146,29 @@ authenticators & spawners, we recommend using both DummyAuthenticator &
 SimpleLocalProcessSpawner. If you are working on just authenticator-related
 parts, use only SimpleLocalProcessSpawner. Similarly, if you are working on
 just spawner-related parts, use only DummyAuthenticator.
+
+## Building frontend components
+
+The testing configuration file also disables caching of static files,
+which allows you to edit and rebuild these files without restarting JupyterHub.
+
+If you are working on the admin react page, which is in the `jsx` directory, you can run:
+
+```bash
+cd jsx
+npm install
+npm run build:watch
+```
+
+to continuously rebuild the admin page, requiring only a refresh of the page.
+
+If you are working on the frontend SCSS files, you can run the same `build:watch` command
+in the _top level_ directory of the repo:
+
+```bash
+npm install
+npm run build:watch
+```
 
 ## Troubleshooting
 
@@ -172,4 +196,47 @@ development updates, with:
 python3 setup.py js    # fetch updated client-side js
 python3 setup.py css   # recompile CSS from LESS sources
 python3 setup.py jsx   # build React admin app
+```
+
+### Failed to bind XXX to `http://127.0.0.1:<port>/<path>`
+
+This error can happen when there's already an application or a service using this
+port.
+
+Use the following command to find out which service is using this port.
+
+```bash
+lsof -P -i TCP:<port> -sTCP:LISTEN
+```
+
+If nothing shows up, it likely means there's a system service that uses it but
+your current user cannot list it. Reuse the same command with sudo.
+
+```bash
+sudo lsof -P -i TCP:<port> -sTCP:LISTEN
+```
+
+Depending on the result of the above commands, the most simple solution is to
+configure JupyterHub to use a different port for the service that is failing.
+
+As an example, the following is a frequently seen issue:
+
+`Failed to bind hub to http://127.0.0.1:8081/hub/`
+
+Using the procedure described above, start with:
+
+```bash
+lsof -P -i TCP:8081 -sTCP:LISTEN
+```
+
+and if nothing shows up:
+
+```bash
+sudo lsof -P -i TCP:8081 -sTCP:LISTEN
+```
+
+Finally, depending on your findings, you can apply the following change and start JupyterHub again:
+
+```python
+c.JupyterHub.hub_port = 9081 # Or any other free port
 ```

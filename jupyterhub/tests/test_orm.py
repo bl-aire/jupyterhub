@@ -1,9 +1,10 @@
 """Tests for the ORM bits"""
+
 # Copyright (c) Jupyter Development Team.
 # Distributed under the terms of the Modified BSD License.
 import os
 import socket
-from datetime import datetime, timedelta
+from datetime import timedelta
 from unittest import mock
 
 import pytest
@@ -11,6 +12,7 @@ import pytest
 from .. import crypto, objects, orm, roles
 from ..emptyclass import EmptyClass
 from ..user import User
+from ..utils import utcnow
 from .mocking import MockSpawner
 
 
@@ -71,13 +73,13 @@ def test_user(db):
 
 
 def test_user_escaping(db):
-    orm_user = orm.User(name='company\\user@company.com,\"quoted\"')
+    orm_user = orm.User(name='company\\user@company.com,"quoted"')
     db.add(orm_user)
     db.commit()
     user = User(orm_user)
-    assert user.name == 'company\\user@company.com,\"quoted\"'
+    assert user.name == 'company\\user@company.com,"quoted"'
     assert user.escaped_name == 'company%5Cuser@company.com%2C%22quoted%22'
-    assert user.json_escaped_name == 'company\\\\user@company.com,\\\"quoted\\\"'
+    assert user.json_escaped_name == 'company\\\\user@company.com,\\"quoted\\"'
 
 
 def test_tokens(db):
@@ -121,7 +123,7 @@ def test_token_expiry(db):
     user = orm.User(name='parker')
     db.add(user)
     db.commit()
-    now = datetime.utcnow()
+    now = utcnow(with_tz=False)
     token = user.new_api_token(expires_in=60)
     orm_token = orm.APIToken.find(db, token=token)
     assert orm_token
@@ -183,7 +185,9 @@ def test_service_server(db):
 
 
 def test_token_find(db):
-    service = db.query(orm.Service).first()
+    service = orm.Service(name='sample')
+    db.add(service)
+    db.commit()
     user = db.query(orm.User).first()
     service_token = service.new_api_token()
     user_token = user.new_api_token()
@@ -236,7 +240,7 @@ async def test_spawn_fails(db):
 
 
 def test_groups(db):
-    user = orm.User.find(db, name='aeofel')
+    user = orm.User(name='aeofel')
     db.add(user)
 
     group = orm.Group(name='lives')
@@ -323,7 +327,9 @@ def test_spawner_delete_cascade(db):
     db.add(user)
     db.commit()
 
-    spawner = orm.Spawner(user=user)
+    spawner = orm.Spawner()
+    db.add(spawner)
+    spawner.user = user
     db.commit()
     spawner.server = server = orm.Server()
     db.commit()
@@ -350,16 +356,19 @@ def test_user_delete_cascade(db):
     # these should all be deleted automatically when the user goes away
     user.new_api_token()
     api_token = user.api_tokens[0]
-    spawner = orm.Spawner(user=user)
+    spawner = orm.Spawner()
+    db.add(spawner)
+    spawner.user = user
     db.commit()
     spawner.server = server = orm.Server()
-    oauth_code = orm.OAuthCode(client=oauth_client, user=user)
+    oauth_code = orm.OAuthCode()
     db.add(oauth_code)
-    oauth_token = orm.APIToken(
-        oauth_client=oauth_client,
-        user=user,
-    )
+    oauth_code.client = oauth_client
+    oauth_code.user = user
+    oauth_token = orm.APIToken()
     db.add(oauth_token)
+    oauth_token.oauth_client = oauth_client
+    oauth_token.user = user
     db.commit()
 
     # record all of the ids
@@ -390,13 +399,14 @@ def test_oauth_client_delete_cascade(db):
 
     # create a bunch of objects that reference the User
     # these should all be deleted automatically when the user goes away
-    oauth_code = orm.OAuthCode(client=oauth_client, user=user)
+    oauth_code = orm.OAuthCode()
     db.add(oauth_code)
-    oauth_token = orm.APIToken(
-        oauth_client=oauth_client,
-        user=user,
-    )
+    oauth_code.client = oauth_client
+    oauth_code.user = user
+    oauth_token = orm.APIToken()
     db.add(oauth_token)
+    oauth_token.oauth_client = oauth_client
+    oauth_token.user = user
     db.commit()
     assert user.api_tokens == [oauth_token]
 
@@ -488,6 +498,71 @@ def test_group_delete_cascade(db):
     assert user1 not in group1.users
 
 
+def test_share_user(db):
+    user1 = orm.User(name='user1')
+    user2 = orm.User(name='user2')
+    spawner = orm.Spawner(user=user1)
+    db.add(user1)
+    db.add(user2)
+    db.add(spawner)
+    db.commit()
+
+    share = orm.Share(
+        owner=user1,
+        spawner=spawner,
+        user=user2,
+    )
+    db.add(share)
+    db.commit()
+    assert user1.shares == [share]
+    assert spawner.shares == [share]
+    assert user1.shared_with_me == []
+    assert user2.shared_with_me == [share]
+    db.delete(share)
+    db.commit()
+    assert user1.shares == []
+    assert spawner.shares == []
+    assert user1.shared_with_me == []
+    assert user2.shared_with_me == []
+
+
+def test_share_group(db):
+    initial_list = list(db.query(orm.User))
+    assert len(initial_list) <= 1
+    user1 = orm.User(name='user1')
+    user2 = orm.User(name='user2')
+    group2 = orm.Group(name='group2')
+    spawner = orm.Spawner(user=user1)
+    db.add(user1)
+    db.add(user2)
+    db.add(group2)
+    db.add(spawner)
+    db.commit()
+    group2.users.append(user2)
+    db.commit()
+    share = orm.Share(
+        owner=user1,
+        spawner=spawner,
+        group=group2,
+    )
+    db.add(share)
+    db.commit()
+    assert user1.shares == [share]
+    assert spawner.shares == [share]
+    assert user1.shared_with_me == []
+    assert user2.shared_with_me == []
+    assert group2.shared_with_me == [share]
+    assert user2.all_shared_with_me == [share]
+    db.delete(share)
+    db.commit()
+    assert user1.shares == []
+    assert spawner.shares == []
+    assert user1.shared_with_me == []
+    assert user2.shared_with_me == []
+    assert group2.shared_with_me == []
+    assert user2.all_shared_with_me == []
+
+
 def test_expiring_api_token(app, user):
     db = app.db
     token = orm.APIToken.new(expires_in=30, user=user)
@@ -500,7 +575,7 @@ def test_expiring_api_token(app, user):
     assert found is orm_token
 
     with mock.patch.object(
-        orm.APIToken, 'now', lambda: datetime.utcnow() + timedelta(seconds=60)
+        orm.APIToken, 'now', lambda: utcnow(with_tz=False) + timedelta(seconds=60)
     ):
         found = orm.APIToken.find(db, token)
         assert found is None
@@ -517,11 +592,11 @@ def test_expiring_oauth_token(app, user):
     db.add(client)
     orm_token = orm.APIToken(
         token=token,
-        oauth_client=client,
-        user=user,
         expires_at=now() + timedelta(seconds=30),
     )
     db.add(orm_token)
+    orm_token.oauth_client = client
+    orm_token.user = user
     db.commit()
 
     found = orm.APIToken.find(db, token)
@@ -543,7 +618,11 @@ def test_expiring_oauth_code(app, user):
     db = app.db
     code = "abc123"
     now = orm.OAuthCode.now
-    orm_code = orm.OAuthCode(code=code, expires_at=now() + 30)
+    client = orm.OAuthClient(
+        identifier="expiring_oauth_code", secret="expiring_oauth_code-yyy"
+    )
+    db.add(client)
+    orm_code = orm.OAuthCode(code=code, expires_at=now() + 30, client=client, user=user)
     db.add(orm_code)
     db.commit()
 
