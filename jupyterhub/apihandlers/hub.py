@@ -1,4 +1,5 @@
 """API handlers for administering the Hub itself"""
+
 # Copyright (c) Jupyter Development Team.
 # Distributed under the terms of the Modified BSD License.
 import json
@@ -31,14 +32,14 @@ class ShutdownAPIHandler(APIHandler):
                 proxy = data['proxy']
                 if proxy not in {True, False}:
                     raise web.HTTPError(
-                        400, "proxy must be true or false, got %r" % proxy
+                        400, f"proxy must be true or false, got {proxy!r}"
                     )
                 app.cleanup_proxy = proxy
             if 'servers' in data:
                 servers = data['servers']
                 if servers not in {True, False}:
                     raise web.HTTPError(
-                        400, "servers must be true or false, got %r" % servers
+                        400, f"servers must be true or false, got {servers!r}"
                     )
                 app.cleanup_servers = servers
 
@@ -51,6 +52,17 @@ class ShutdownAPIHandler(APIHandler):
 
 
 class RootAPIHandler(APIHandler):
+    def set_default_headers(self):
+        """
+        Set any headers passed as tornado_settings['headers'].
+
+        Also responsible for setting content-type header
+        """
+        if 'Access-Control-Allow-Origin' not in self.settings.get("headers", {}):
+            # allow CORS requests to this endpoint by default
+            self.set_header('Access-Control-Allow-Origin', '*')
+        super().set_default_headers()
+
     def check_xsrf_cookie(self):
         return
 

@@ -8,13 +8,13 @@ sphinx:
   configuration: docs/source/conf.py
 
 build:
-  os: ubuntu-20.04
+  os: ubuntu-24.04
   tools:
-    nodejs: "16"
-    python: "3.9"
+    python: "3.13"
 
 python:
   install:
+    - path: .
     - requirements: docs/requirements.txt
 
 formats:

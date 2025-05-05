@@ -1,14 +1,17 @@
-import { withProps } from "recompose";
+import { withProps } from "./_recompose";
 import { jhapiRequest } from "./jhapiUtil";
 
 const withAPI = withProps(() => ({
-  updateUsers: (offset, limit, name_filter) =>
-    jhapiRequest(
-      `/users?include_stopped_servers&offset=${offset}&limit=${limit}&name_filter=${
-        name_filter || ""
-      }`,
-      "GET",
-    ).then((data) => data.json()),
+  updateUsers: (options) => {
+    let params = new URLSearchParams();
+    params.set("include_stopped_servers", "1");
+    for (let key in options) {
+      params.set(key, options[key]);
+    }
+    return jhapiRequest(`/users?${params.toString()}`, "GET").then((data) =>
+      data.json(),
+    );
+  },
   updateGroups: (offset, limit) =>
     jhapiRequest(`/groups?offset=${offset}&limit=${limit}`, "GET").then(
       (data) => data.json(),
@@ -18,10 +21,26 @@ const withAPI = withProps(() => ({
     jhapiRequest("/users/" + name + "/servers/" + (serverName || ""), "POST"),
   stopServer: (name, serverName = "") =>
     jhapiRequest("/users/" + name + "/servers/" + (serverName || ""), "DELETE"),
+  deleteServer: (name, serverName = "") =>
+    jhapiRequest(
+      "/users/" + name + "/servers/" + (serverName || ""),
+      "DELETE",
+      { remove: true },
+    ),
   startAll: (names) =>
     names.map((e) => jhapiRequest("/users/" + e + "/server", "POST")),
   stopAll: (names) =>
-    names.map((e) => jhapiRequest("/users/" + e + "/server", "DELETE")),
+    names.map((name) =>
+      jhapiRequest("/users/" + name, "GET")
+        .then((data) => data.json())
+        .then((data) =>
+          Promise.all(
+            Object.keys(data.servers).map((server) =>
+              jhapiRequest("/users/" + name + "/servers/" + server, "DELETE"),
+            ),
+          ),
+        ),
+    ),
   addToGroup: (users, groupname) =>
     jhapiRequest("/groups/" + groupname + "/users", "POST", { users }),
   updateProp: (propobject, groupname) =>

@@ -1,4 +1,5 @@
 """Basic html-rendering handlers."""
+
 # Copyright (c) Jupyter Development Team.
 # Distributed under the terms of the Modified BSD License.
 import asyncio
@@ -11,10 +12,10 @@ from jinja2 import TemplateNotFound
 from tornado import web
 from tornado.httputil import url_concat
 
-from .. import __version__
+from .. import __version__, orm
 from ..metrics import SERVER_POLL_DURATION_SECONDS, ServerPollStatus
-from ..scopes import needs_scope
-from ..utils import maybe_future, url_escape_path, url_path_join
+from ..scopes import describe_raw_scopes, needs_scope
+from ..utils import maybe_future, url_escape_path, url_path_join, utcnow
 from .base import BaseHandler
 
 
@@ -141,10 +142,8 @@ class SpawnHandler(BaseHandler):
                 if named_server_limit_per_user <= len(named_spawners):
                     raise web.HTTPError(
                         400,
-                        "User {} already has the maximum of {} named servers."
-                        "  One must be deleted before a new server can be created".format(
-                            user.name, named_server_limit_per_user
-                        ),
+                        f"User {user.name} already has the maximum of {named_server_limit_per_user} named servers."
+                        "  One must be deleted before a new server can be created",
                     )
 
         if not self.allow_named_servers and user.running:
@@ -237,12 +236,12 @@ class SpawnHandler(BaseHandler):
         if for_user != user.name:
             user = self.find_user(for_user)
             if user is None:
-                raise web.HTTPError(404, "No such user: %s" % for_user)
+                raise web.HTTPError(404, f"No such user: {for_user}")
 
         spawner = user.get_spawner(server_name, replace_failed=True)
 
         if spawner.ready:
-            raise web.HTTPError(400, "%s is already running" % (spawner._log_name))
+            raise web.HTTPError(400, f"{spawner._log_name} is already running")
         elif spawner.pending:
             raise web.HTTPError(
                 400, f"{spawner._log_name} is pending {spawner.pending}"
@@ -252,7 +251,7 @@ class SpawnHandler(BaseHandler):
         for key, byte_list in self.request.body_arguments.items():
             form_options[key] = [bs.decode('utf8') for bs in byte_list]
         for key, byte_list in self.request.files.items():
-            form_options["%s_file" % key] = byte_list
+            form_options[f"{key}_file"] = byte_list
         try:
             self.log.debug(
                 "Triggering spawn with supplied form options for %s", spawner._log_name
@@ -346,7 +345,7 @@ class SpawnPendingHandler(BaseHandler):
         if for_user != current_user.name:
             user = self.find_user(for_user)
             if user is None:
-                raise web.HTTPError(404, "No such user: %s" % for_user)
+                raise web.HTTPError(404, f"No such user: {for_user}")
 
         if server_name and server_name not in user.spawners:
             raise web.HTTPError(404, f"{user.name} has no such server {server_name}")
@@ -376,7 +375,10 @@ class SpawnPendingHandler(BaseHandler):
             spawn_url = url_path_join(
                 self.hub.base_url, "spawn", user.escaped_name, escaped_server_name
             )
-            self.set_status(500)
+            status_code = 500
+            if isinstance(exc, web.HTTPError):
+                status_code = exc.status_code
+            self.set_status(status_code)
             html = await self.render_template(
                 "not_running.html",
                 user=user,
@@ -467,7 +469,6 @@ class AdminHandler(BaseHandler):
             named_server_limit_per_user=await self.get_current_user_named_server_limit(),
             server_version=f'{__version__} {self.version_hash}',
             api_page_limit=self.settings["api_page_default_limit"],
-            base_url=self.settings["base_url"],
         )
         self.finish(html)
 
@@ -484,7 +485,7 @@ class TokenPageHandler(BaseHandler):
         def sort_key(token):
             return (token.last_activity or never, token.created or never)
 
-        now = datetime.utcnow()
+        now = utcnow(with_tz=False)
 
         # group oauth client tokens by client id
         all_tokens = defaultdict(list)
@@ -543,13 +544,129 @@ class TokenPageHandler(BaseHandler):
         oauth_clients = sorted(oauth_clients, key=sort_key, reverse=True)
 
         auth_state = await self.current_user.get_auth_state()
+        expires_in_max = self.settings["token_expires_in_max_seconds"]
+        options = [
+            (3600, "1 Hour"),
+            (86400, "1 Day"),
+            (7 * 86400, "1 Week"),
+            (30 * 86400, "1 Month"),
+            (365 * 86400, "1 Year"),
+        ]
+        if expires_in_max:
+            # omit items that exceed the limit
+            options = [
+                (seconds, label)
+                for (seconds, label) in options
+                if seconds <= expires_in_max
+            ]
+            if expires_in_max not in (seconds for (seconds, label) in options):
+                # max not exactly in list, add it
+                # this also ensures options_list is never empty
+                max_hours = expires_in_max / 3600
+                max_days = max_hours / 24
+                if max_days < 3:
+                    max_label = f"{max_hours:.0f} hours"
+                else:
+                    # this could be a lot of days, but no need to get fancy
+                    max_label = f"{max_days:.0f} days"
+                options.append(("", f"Max ({max_label})"))
+        else:
+            options.append(("", "Never"))
+
+        options_html_elements = [
+            f'<option value="{value}">{label}</option>' for value, label in options
+        ]
+        # make the last item selected
+        options_html_elements[-1] = options_html_elements[-1].replace(
+            "<option ", '<option selected="selected"'
+        )
+        expires_in_options_html = "\n".join(options_html_elements)
         html = await self.render_template(
             'token.html',
             api_tokens=api_tokens,
             oauth_clients=oauth_clients,
             auth_state=auth_state,
+            token_expires_in_options_html=expires_in_options_html,
+            token_expires_in_max_seconds=expires_in_max,
         )
         self.finish(html)
+
+
+class AcceptShareHandler(BaseHandler):
+    def _get_next_url(self, owner, spawner):
+        """Get next_url for a given owner/spawner"""
+        next_url = self.get_argument("next", "")
+        next_url = self._validate_next_url(next_url)
+        if next_url:
+            return next_url
+
+        # default behavior:
+        # if it's active, redirect to server URL
+        if spawner.name in owner.spawners:
+            spawner = owner.spawners[spawner.name]
+            if spawner.active:
+                # redirect to spawner url
+                next_url = owner.server_url(spawner.name)
+
+        if not next_url:
+            # spawner not active
+            # TODO: next_url not specified and not running, what do we do?
+            # for now, redirect as if it's running,
+            # but that's very likely to fail on "You can't launch this server"
+            # is there a better experience for this?
+            next_url = owner.server_url(spawner.name)
+        # validate again, which strips away host to just absolute path
+        return self._validate_next_url(next_url)
+
+    @web.authenticated
+    async def get(self):
+        code = self.get_argument("code")
+        share_code = orm.ShareCode.find(self.db, code=code)
+        if share_code is None:
+            raise web.HTTPError(404, "Share not found or expired")
+        if share_code.owner == self.current_user.orm_user:
+            raise web.HTTPError(403, "You can't share with yourself!")
+
+        scope_descriptions = describe_raw_scopes(
+            share_code.scopes,
+            username=self.current_user.name,
+        )
+        owner = self._user_from_orm(share_code.owner)
+        spawner = share_code.spawner
+        if spawner.name in owner.spawners:
+            spawner = owner.spawners[spawner.name]
+            spawner_ready = spawner.ready
+        else:
+            spawner_ready = False
+
+        html = await self.render_template(
+            'accept-share.html',
+            code=code,
+            owner=owner,
+            spawner=spawner,
+            spawner_ready=spawner_ready,
+            spawner_url=owner.server_url(spawner.name),
+            scope_descriptions=scope_descriptions,
+            next_url=self._get_next_url(owner, spawner),
+        )
+        self.finish(html)
+
+    @web.authenticated
+    def post(self):
+        code = self.get_argument("code")
+        self.log.debug("Looking up %s", code)
+        share_code = orm.ShareCode.find(self.db, code=code)
+        if share_code is None:
+            raise web.HTTPError(400, f"Invalid share code: {code}")
+        if share_code.owner == self.current_user.orm_user:
+            raise web.HTTPError(400, "You can't share with yourself!")
+        user = self.current_user
+        share = share_code.exchange(user.orm_user)
+        owner = self._user_from_orm(share.owner)
+        spawner = share.spawner
+
+        next_url = self._get_next_url(owner, spawner)
+        self.redirect(next_url)
 
 
 class ProxyErrorHandler(BaseHandler):
@@ -566,7 +683,7 @@ class ProxyErrorHandler(BaseHandler):
             message_html = ' '.join(
                 [
                     "Your server appears to be down.",
-                    "Try restarting it <a href='%s'>from the hub</a>" % hub_home,
+                    f"Try restarting it <a href='{hub_home}'>from the hub</a>",
                 ]
             )
         ns = dict(
@@ -579,9 +696,9 @@ class ProxyErrorHandler(BaseHandler):
         self.set_header('Content-Type', 'text/html')
         # render the template
         try:
-            html = await self.render_template('%s.html' % status_code, **ns)
+            html = await self.render_template(f'{status_code}.html', **ns)
         except TemplateNotFound:
-            self.log.debug("No template for %d", status_code)
+            self.log.debug("Using default error template for %d", status_code)
             html = await self.render_template('error.html', **ns)
 
         self.write(html)
@@ -608,6 +725,7 @@ default_handlers = [
     (r'/spawn/([^/]+)', SpawnHandler),
     (r'/spawn/([^/]+)/([^/]+)', SpawnHandler),
     (r'/token', TokenPageHandler),
+    (r'/accept-share', AcceptShareHandler),
     (r'/error/(\d+)', ProxyErrorHandler),
     (r'/health$', HealthCheckHandler),
     (r'/api/health$', HealthCheckHandler),

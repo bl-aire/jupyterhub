@@ -1,10 +1,10 @@
 """Tests for services"""
+
 import os
 import sys
 from binascii import hexlify
+from contextlib import asynccontextmanager
 from subprocess import Popen
-
-from async_generator import asynccontextmanager
 
 from ..utils import (
     exponential_backoff,
@@ -27,7 +27,7 @@ async def external_service(app, name='mockservice'):
         'JUPYTERHUB_API_TOKEN': hexlify(os.urandom(5)),
         'JUPYTERHUB_SERVICE_NAME': name,
         'JUPYTERHUB_API_URL': url_path_join(app.hub.url, 'api/'),
-        'JUPYTERHUB_SERVICE_URL': 'http://127.0.0.1:%i' % random_port(),
+        'JUPYTERHUB_SERVICE_URL': f'http://127.0.0.1:{random_port()}',
     }
     proc = Popen(mockservice_cmd, env=env)
     try:

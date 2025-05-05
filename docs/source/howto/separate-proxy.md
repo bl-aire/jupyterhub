@@ -1,4 +1,4 @@
-(separate-proxy)=
+(howto:separate-proxy)=
 
 # Running proxy separately from the hub
 
@@ -70,7 +70,7 @@ need to configure the options there.
 ## Docker image
 
 You can use [jupyterhub configurable-http-proxy docker
-image](https://hub.docker.com/r/jupyterhub/configurable-http-proxy/)
+image](https://quay.io/repository/jupyterhub/configurable-http-proxy)
 to run the proxy.
 
 ## See also

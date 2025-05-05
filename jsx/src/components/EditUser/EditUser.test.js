@@ -1,10 +1,9 @@
-import React from "react";
+import React, { act } from "react";
 import "@testing-library/jest-dom";
-import { act } from "react-dom/test-utils";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { Provider, useDispatch, useSelector } from "react-redux";
 import { createStore } from "redux";
-import { HashRouter } from "react-router-dom";
+import { HashRouter } from "react-router";
 // eslint-disable-next-line
 import regeneratorRuntime from "regenerator-runtime";
 
@@ -14,6 +13,14 @@ jest.mock("react-redux", () => ({
   ...jest.requireActual("react-redux"),
   useDispatch: jest.fn(),
   useSelector: jest.fn(),
+}));
+
+jest.mock("react-router", () => ({
+  ...jest.requireActual("react-router"),
+  useLocation: jest.fn().mockImplementation(() => {
+    return { state: { username: "foo", has_admin: false } };
+  }),
+  useNavigate: jest.fn(),
 }));
 
 var mockAsync = (data) =>
@@ -26,11 +33,9 @@ var editUserJsx = (callbackSpy, empty) => (
   <Provider store={createStore(() => {}, {})}>
     <HashRouter>
       <EditUser
-        location={empty ? {} : { state: { username: "foo", has_admin: false } }}
         deleteUser={callbackSpy}
         editUser={callbackSpy}
         updateUsers={callbackSpy}
-        history={{ push: () => {} }}
         noChangeEvent={callbackSpy}
       />
     </HashRouter>
@@ -52,6 +57,7 @@ beforeEach(() => {
 
 afterEach(() => {
   useDispatch.mockClear();
+  jest.runAllTimers();
 });
 
 test("Renders", async () => {
@@ -74,7 +80,7 @@ test("Calls the delete user function when the button is pressed", async () => {
   let deleteUser = screen.getByTestId("delete-user");
 
   await act(async () => {
-    fireEvent.click(deleteUser);
+    await fireEvent.click(deleteUser);
   });
 
   expect(callbackSpy).toHaveBeenCalled();
@@ -89,7 +95,7 @@ test("Submits the edits when the button is pressed", async () => {
 
   let submit = screen.getByTestId("submit");
   await act(async () => {
-    fireEvent.click(submit);
+    await fireEvent.click(submit);
   });
 
   expect(callbackSpy).toHaveBeenCalled();
@@ -107,7 +113,7 @@ test("Shows a UI error dialogue when user edit fails", async () => {
 
   fireEvent.blur(usernameInput, { target: { value: "whatever" } });
   await act(async () => {
-    fireEvent.click(submit);
+    await fireEvent.click(submit);
   });
 
   let errorDialog = screen.getByText("Failed to edit user.");
@@ -128,7 +134,7 @@ test("Shows a UI error dialogue when user edit returns an improper status code",
 
   fireEvent.blur(usernameInput, { target: { value: "whatever" } });
   await act(async () => {
-    fireEvent.click(submit);
+    await fireEvent.click(submit);
   });
 
   let errorDialog = screen.getByText("Failed to edit user.");

@@ -1,4 +1,5 @@
 """Some general objects for use in JupyterHub"""
+
 # Copyright (c) Jupyter Development Team.
 # Distributed under the terms of the Modified BSD License.
 import socket
@@ -11,6 +12,7 @@ from . import orm
 from .traitlets import URLPrefix
 from .utils import (
     can_connect,
+    fmt_ip_url,
     make_ssl_context,
     random_port,
     url_path_join,
@@ -49,7 +51,7 @@ class Server(HasTraits):
         since it can be non-connectable value, such as '', meaning all interfaces.
         """
         if self.ip in {'', '0.0.0.0', '::'}:
-            return self.url.replace(self._connect_ip, self.ip or '*', 1)
+            return self.url.replace(self._connect_ip, fmt_ip_url(self.ip) or '*', 1)
         return self.url
 
     @observe('bind_url')
@@ -162,11 +164,9 @@ class Server(HasTraits):
         return f"{self.host}{self.base_url}"
 
     def __repr__(self):
-        return "{name}(url={url}, bind_url={bind})".format(
-            name=self.__class__.__name__, url=self.url, bind=self.bind_url
-        )
+        return f"{self.__class__.__name__}(url={self.url}, bind_url={self.bind_url})"
 
-    def wait_up(self, timeout=10, http=False, ssl_context=None):
+    def wait_up(self, timeout=10, http=False, ssl_context=None, extra_path=""):
         """Wait for this server to come up"""
         if http:
             ssl_context = ssl_context or make_ssl_context(
@@ -174,7 +174,9 @@ class Server(HasTraits):
             )
 
             return wait_for_http_server(
-                self.url, timeout=timeout, ssl_context=ssl_context
+                url_path_join(self.url, extra_path),
+                timeout=timeout,
+                ssl_context=ssl_context,
             )
         else:
             return wait_for_server(
@@ -215,4 +217,4 @@ class Hub(Server):
         return url_path_join(self.url, 'api')
 
     def __repr__(self):
-        return f"<{self.__class__.__name__} {self.ip}:{self.port}>"
+        return f"<{self.__class__.__name__} {fmt_ip_url(self.ip)}:{self.port}>"

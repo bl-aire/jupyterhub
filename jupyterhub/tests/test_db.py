@@ -35,7 +35,7 @@ def generate_old_db(env_dir, hub_version, db_url):
         pkgs.append('sqlalchemy<2')
 
     if 'mysql' in db_url:
-        pkgs.append('mysql-connector-python')
+        pkgs.append('mysqlclient')
     elif 'postgres' in db_url:
         pkgs.append('psycopg2-binary')
     check_call([env_pip, 'install'] + pkgs)
@@ -44,7 +44,9 @@ def generate_old_db(env_dir, hub_version, db_url):
 
 # changes to this version list must also be reflected
 # in ci/init-db.sh
-@pytest.mark.parametrize('hub_version', ["1.1.0", "1.2.2", "1.3.0", "1.5.0", "2.1.1"])
+@pytest.mark.parametrize(
+    'hub_version', ['1.1.0', '1.2.2', '1.3.0', '1.5.0', '2.1.1', '3.1.1']
+)
 async def test_upgrade(tmpdir, hub_version):
     db_url = os.getenv('JUPYTERHUB_TEST_DB_URL')
     if db_url:
@@ -55,7 +57,7 @@ async def test_upgrade(tmpdir, hub_version):
 
     # use persistent temp env directory
     # to reuse across multiple runs
-    env_dir = os.path.join(tempfile.gettempdir(), 'test-hub-upgrade-%s' % hub_version)
+    env_dir = os.path.join(tempfile.gettempdir(), f'test-hub-upgrade-{hub_version}')
 
     generate_old_db(env_dir, hub_version, db_url)
 
@@ -90,3 +92,10 @@ async def test_upgrade(tmpdir, hub_version):
     for token in query:
         assert token.scopes, f"Upgraded token {token} has no scopes"
         _check_scopes_exist(token.scopes)
+
+    # make sure migrated roles are not managed or null
+    for role in db.query(orm.Role):
+        assert role.managed_by_auth is False
+    for assignment_table in orm._role_associations.values():
+        for assignment in db.query(assignment_table):
+            assert assignment.managed_by_auth is False

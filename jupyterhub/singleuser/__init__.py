@@ -12,6 +12,7 @@ Application subclass can be controlled with environment variables:
 - JUPYTERHUB_SINGLEUSER_EXTENSION=1 to opt-in to the extension (requires Jupyter Server 2)
 - JUPYTERHUB_SINGLEUSER_APP=notebook (or jupyter-server) to opt-in
 """
+
 import os
 
 from .mixins import HubAuthenticatedHandler, make_singleuser_app
@@ -62,14 +63,35 @@ if _as_extension:
             f"Cannot use JUPYTERHUB_SINGLEUSER_EXTENSION={_extension_env} with JUPYTERHUB_SINGLEUSER_APP={_app_env}."
             " Please pick one or the other."
         )
-    from .extension import main
+    try:
+        from .extension import main
+    except ImportError as e:
+        # raise from to preserve original import error
+        raise ImportError(
+            "Failed to import JupyterHub singleuser extension."
+            " Make sure to install dependencies for your single-user server, e.g.\n"
+            "    pip install jupyterlab"
+        ) from e
 else:
-    from .app import SingleUserNotebookApp, main
+    try:
+        from .app import SingleUserNotebookApp, main
+    except ImportError as e:
+        # raise from to preserve original import error
+        if _app_env:
+            _app_env_log = f"JUPYTERHUB_SINGLEUSER_APP={_app_env}"
+        else:
+            _app_env_log = "default single-user server"
+        raise ImportError(
+            f"Failed to import {_app_env_log}."
+            " Make sure to install dependencies for your single-user server, e.g.\n"
+            "    pip install jupyterlab"
+        ) from e
 
     # backward-compatibility
-    JupyterHubLoginHandler = SingleUserNotebookApp.login_handler_class
-    JupyterHubLogoutHandler = SingleUserNotebookApp.logout_handler_class
-    OAuthCallbackHandler = SingleUserNotebookApp.oauth_callback_handler_class
+    if SingleUserNotebookApp is not None:
+        JupyterHubLoginHandler = SingleUserNotebookApp.login_handler_class
+        JupyterHubLogoutHandler = SingleUserNotebookApp.logout_handler_class
+        OAuthCallbackHandler = SingleUserNotebookApp.oauth_callback_handler_class
 
 
 __all__ = [

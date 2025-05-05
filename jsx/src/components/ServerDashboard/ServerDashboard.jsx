@@ -1,78 +1,71 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, Fragment } from "react";
 import { useSelector, useDispatch } from "react-redux";
 import { debounce } from "lodash";
 import PropTypes from "prop-types";
+import ErrorAlert from "../../util/error";
+import { User, Server } from "../../util/jhapiUtil";
 
 import {
   Button,
   Col,
   Row,
+  Form,
   FormControl,
   Card,
   CardGroup,
   Collapse,
 } from "react-bootstrap";
-import ReactObjectTableViewer from "react-object-table-viewer";
+import ReactObjectTableViewer from "../ReactObjectTableViewer/ReactObjectTableViewer";
 
-import { Link } from "react-router-dom";
+import { Link, useSearchParams, useNavigate } from "react-router";
 import { FaSort, FaSortUp, FaSortDown } from "react-icons/fa";
 
 import "./server-dashboard.css";
 import { timeSince } from "../../util/timeSince";
+import { usePaginationParams } from "../../util/paginationParams";
 import PaginationFooter from "../PaginationFooter/PaginationFooter";
 
-const AccessServerButton = ({ url }) => (
-  <a href={url || ""}>
-    <button className="btn btn-primary btn-xs" style={{ marginRight: 20 }}>
-      Access Server
-    </button>
-  </a>
+const RowListItem = ({ text }) => (
+  <span className="server-dashboard-row-list-item">{text}</span>
 );
+RowListItem.propTypes = {
+  text: PropTypes.string,
+};
 
 const ServerDashboard = (props) => {
-  let base_url = window.base_url || "/";
-  // sort methods
-  var usernameDesc = (e) => e.sort((a, b) => (a.name > b.name ? 1 : -1)),
-    usernameAsc = (e) => e.sort((a, b) => (a.name < b.name ? 1 : -1)),
-    adminDesc = (e) => e.sort((a) => (a.admin ? -1 : 1)),
-    adminAsc = (e) => e.sort((a) => (a.admin ? 1 : -1)),
-    dateDesc = (e) =>
-      e.sort((a, b) =>
-        new Date(a.last_activity) - new Date(b.last_activity) > 0 ? -1 : 1,
-      ),
-    dateAsc = (e) =>
-      e.sort((a, b) =>
-        new Date(a.last_activity) - new Date(b.last_activity) > 0 ? 1 : -1,
-      ),
-    runningAsc = (e) => e.sort((a) => (a.server == null ? -1 : 1)),
-    runningDesc = (e) => e.sort((a) => (a.server == null ? 1 : -1));
+  const base_url = window.base_url || "/";
+  const [searchParams, setSearchParams] = useSearchParams();
 
-  var [errorAlert, setErrorAlert] = useState(null);
-  var [sortMethod, setSortMethod] = useState(null);
-  var [disabledButtons, setDisabledButtons] = useState({});
-  var [collapseStates, setCollapseStates] = useState({});
+  const [errorAlert, setErrorAlert] = useState(null);
+  const [collapseStates, setCollapseStates] = useState({});
 
-  var user_data = useSelector((state) => state.user_data),
-    user_page = useSelector((state) => state.user_page),
-    name_filter = useSelector((state) => state.name_filter);
+  let user_data = useSelector((state) => state.user_data);
+  const user_page = useSelector((state) => state.user_page);
 
-  var offset = user_page ? user_page.offset : 0;
-  var limit = user_page ? user_page.limit : window.api_page_limit;
-  var total = user_page ? user_page.total : undefined;
+  const { offset, setOffset, setLimit, handleLimit, limit } =
+    usePaginationParams();
+
+  const name_filter = searchParams.get("name_filter") || "";
+  const sort = searchParams.get("sort") || "id";
+  const state_filter = searchParams.get("state") || "";
+
+  const total = user_page ? user_page.total : undefined;
 
   const dispatch = useDispatch();
+  const navigate = useNavigate();
 
   var {
     updateUsers,
     shutdownHub,
     startServer,
     stopServer,
+    deleteServer,
     startAll,
     stopAll,
-    history,
   } = props;
 
   const dispatchPageUpdate = (data, page) => {
+    // persist user data, triggers rerender
     dispatch({
       type: "USER_PAGE",
       value: {
@@ -82,150 +75,279 @@ const ServerDashboard = (props) => {
     });
   };
 
-  const setOffset = (newOffset) => {
-    dispatch({
-      type: "USER_OFFSET",
-      value: {
-        offset: newOffset,
-      },
+  const setNameFilter = (new_name_filter) => {
+    // persist ?name_filter parameter
+    // store in url param, clear when value is empty
+    setSearchParams((params) => {
+      // clear offset when name filter changes
+      if (new_name_filter !== name_filter) {
+        params.delete("offset");
+      }
+      if (new_name_filter) {
+        params.set("name_filter", new_name_filter);
+      } else {
+        params.delete("name_filter");
+      }
+      return params;
     });
   };
 
-  const setNameFilter = (name_filter) => {
-    dispatch({
-      type: "USER_NAME_FILTER",
-      value: {
-        name_filter: name_filter,
-      },
+  const setSort = (sort) => {
+    // persist ?sort parameter
+    // store in url param, clear when value is default ('id')
+    setSearchParams((params) => {
+      if (sort === "id") {
+        params.delete("id");
+      } else {
+        params.set("sort", sort);
+      }
+      return params;
     });
+  };
+
+  const setStateFilter = (new_state_filter) => {
+    // persist ?state filter
+    // store in url param, clear when value is default ('')
+    setSearchParams((params) => {
+      // clear offset when filter changes
+      if (new_state_filter !== state_filter) {
+        params.delete("offset");
+      }
+      if (!new_state_filter) {
+        params.delete("state");
+      } else {
+        params.set("state", new_state_filter);
+      }
+      return params;
+    });
+  };
+
+  // single callback to reload the page
+  // uses current state
+  const loadPageData = () => {
+    const abortHandle = { cancelled: false };
+    (async () => {
+      try {
+        const data = await updateUsers({
+          offset,
+          limit,
+          name_filter,
+          sort,
+          state: state_filter,
+        });
+        // cancelled (e.g. param changed while waiting for response)
+        if (abortHandle.cancelled) return;
+        if (
+          data._pagination.offset &&
+          data._pagination.total <= data._pagination.offset
+        ) {
+          // reset offset if we're out of bounds,
+          // then load again
+          setOffset(0);
+          return;
+        }
+        // actually update page data
+        dispatchPageUpdate(data.items, data._pagination);
+      } catch (e) {
+        console.error("Failed to update user list.", e);
+        setErrorAlert("Failed to update user list.");
+      }
+    })();
+    // returns cancellation callback
+    return () => {
+      // cancel stale load
+      abortHandle.cancelled = true;
+    };
   };
 
   useEffect(() => {
-    updateUsers(offset, limit, name_filter)
-      .then((data) => dispatchPageUpdate(data.items, data._pagination))
-      .catch((err) => setErrorAlert("Failed to update user list."));
-  }, [offset, limit, name_filter]);
+    return loadPageData();
+  }, [limit, name_filter, offset, sort, state_filter]);
 
   if (!user_data || !user_page) {
     return <div data-testid="no-show"></div>;
   }
 
-  var slice = [offset, limit, name_filter];
-
   const handleSearch = debounce(async (event) => {
     setNameFilter(event.target.value);
   }, 300);
 
-  if (sortMethod != null) {
-    user_data = sortMethod(user_data);
-  }
-
-  const StopServerButton = ({ serverName, userName }) => {
+  const ServerButton = ({
+    server,
+    user,
+    action,
+    name,
+    variant,
+    extraClass,
+  }) => {
     var [isDisabled, setIsDisabled] = useState(false);
     return (
-      <button
-        className="btn btn-danger btn-xs stop-button"
-        disabled={isDisabled}
+      <Button
+        size="xs"
+        variant={variant}
+        className={extraClass}
+        disabled={isDisabled || server.pending}
         onClick={() => {
           setIsDisabled(true);
-          stopServer(userName, serverName)
+          action(user.name, server.name)
             .then((res) => {
               if (res.status < 300) {
-                updateUsers(...slice)
-                  .then((data) => {
-                    dispatchPageUpdate(
-                      data.items,
-                      data._pagination,
-                      name_filter,
-                    );
-                  })
-                  .catch(() => {
-                    setIsDisabled(false);
-                    setErrorAlert(`Failed to update users list.`);
-                  });
+                loadPageData();
               } else {
-                setErrorAlert(`Failed to stop server.`);
+                setErrorAlert(`Failed to ${name.toLowerCase()}.`);
                 setIsDisabled(false);
               }
               return res;
             })
             .catch(() => {
-              setErrorAlert(`Failed to stop server.`);
+              setErrorAlert(`Failed to ${name.toLowerCase()}.`);
               setIsDisabled(false);
             });
         }}
       >
-        Stop Server
-      </button>
+        {name}
+      </Button>
     );
   };
 
-  const StartServerButton = ({ serverName, userName }) => {
-    var [isDisabled, setIsDisabled] = useState(false);
+  ServerButton.propTypes = {
+    server: Server,
+    user: User,
+    action: PropTypes.string,
+    name: PropTypes.string,
+    variant: PropTypes.string,
+    extraClass: PropTypes.string,
+  };
+
+  const StopServerButton = ({ server, user }) => {
+    if (!server.ready) {
+      return null;
+    }
+    return ServerButton({
+      server,
+      user,
+      action: stopServer,
+      name: "Stop Server",
+      variant: "danger",
+      extraClass: "stop-button",
+    });
+  };
+
+  StopServerButton.propTypes = {
+    server: Server,
+    user: User,
+  };
+
+  const DeleteServerButton = ({ server, user }) => {
+    if (!server.name) {
+      // It's not possible to delete unnamed servers
+      return null;
+    }
+    if (server.ready || server.pending) {
+      return null;
+    }
+    return ServerButton({
+      server,
+      user,
+      action: deleteServer,
+      name: "Delete Server",
+      variant: "danger",
+      extraClass: "stop-button",
+    });
+  };
+
+  DeleteServerButton.propTypes = {
+    server: Server,
+    user: User,
+  };
+
+  const StartServerButton = ({ server, user }) => {
+    if (server.ready) {
+      return null;
+    }
+    return ServerButton({
+      server,
+      user,
+      action: startServer,
+      name: server.pending ? "Server is pending" : "Start Server",
+      variant: "success",
+      extraClass: "start-button",
+    });
+  };
+
+  StartServerButton.propTypes = {
+    server: Server,
+    user: User,
+  };
+
+  const SpawnPageButton = ({ server, user }) => {
+    if (server.ready) {
+      return null;
+    }
     return (
-      <button
-        className="btn btn-success btn-xs start-button"
-        disabled={isDisabled}
-        onClick={() => {
-          setIsDisabled(true);
-          startServer(userName, serverName)
-            .then((res) => {
-              if (res.status < 300) {
-                updateUsers(...slice)
-                  .then((data) => {
-                    dispatchPageUpdate(
-                      data.items,
-                      data._pagination,
-                      name_filter,
-                    );
-                  })
-                  .catch(() => {
-                    setErrorAlert(`Failed to update users list.`);
-                    setIsDisabled(false);
-                  });
-              } else {
-                setErrorAlert(`Failed to start server.`);
-                setIsDisabled(false);
-              }
-              return res;
-            })
-            .catch(() => {
-              setErrorAlert(`Failed to start server.`);
-              setIsDisabled(false);
-            });
-        }}
+      <a
+        href={`${base_url}spawn/${user.name}${
+          server.name ? "/" + server.name : ""
+        }`}
       >
-        Start Server
-      </button>
+        <Button variant="light" size="xs">
+          Spawn Page
+        </Button>
+      </a>
     );
   };
 
-  const EditUserCell = ({ user }) => {
+  SpawnPageButton.propTypes = {
+    server: Server,
+    user: User,
+  };
+
+  const AccessServerButton = ({ server }) => {
+    if (!server.ready) {
+      return null;
+    }
     return (
-      <td>
-        <button
-          className="btn btn-primary btn-xs"
-          style={{ marginRight: 20 }}
-          onClick={() =>
-            history.push({
-              pathname: "/edit-user",
-              state: {
-                username: user.name,
-                has_admin: user.admin,
-              },
-            })
-          }
-        >
-          Edit User
-        </button>
-      </td>
+      <a href={server.url || ""}>
+        <Button variant="primary" size="xs">
+          Access Server
+        </Button>
+      </a>
+    );
+  };
+  AccessServerButton.propTypes = {
+    server: Server,
+  };
+
+  const EditUserButton = ({ user }) => {
+    return (
+      <Button
+        size="xs"
+        variant="light"
+        onClick={() =>
+          navigate("/edit-user", {
+            state: {
+              username: user.name,
+              has_admin: user.admin,
+            },
+          })
+        }
+      >
+        Edit User
+      </Button>
     );
   };
 
-  const ServerRowTable = ({ data }) => {
+  EditUserButton.propTypes = {
+    user: User,
+  };
+
+  const ServerRowTable = ({ data, exclude }) => {
     const sortedData = Object.keys(data)
       .sort()
       .reduce(function (result, key) {
+        if (exclude && exclude.includes(key)) {
+          return result;
+        }
         let value = data[key];
         switch (key) {
           case "last_activity":
@@ -236,15 +358,20 @@ const ServerDashboard = (props) => {
             break;
         }
         if (Array.isArray(value)) {
-          // cast arrays (e.g. roles, groups) to string
-          value = value.sort().join(", ");
+          value = (
+            <Fragment>
+              {value.sort().flatMap((v) => (
+                <RowListItem text={v} />
+              ))}
+            </Fragment>
+          );
         }
         result[key] = value;
         return result;
       }, {});
     return (
       <ReactObjectTableViewer
-        className="table-striped table-bordered"
+        className="table table-striped table-bordered"
         style={{
           padding: "3px 6px",
           margin: "auto",
@@ -260,131 +387,108 @@ const ServerDashboard = (props) => {
     );
   };
 
-  const serverRow = (user, server) => {
-    const { servers, ...userNoServers } = user;
+  ServerRowTable.propTypes = {
+    data: Server,
+    exclude: PropTypes.arrayOf(PropTypes.string),
+  };
+
+  const ServerRow = ({ user, server }) => {
     const serverNameDash = server.name ? `-${server.name}` : "";
     const userServerName = user.name + serverNameDash;
     const open = collapseStates[userServerName] || false;
-    return [
-      <tr key={`${userServerName}-row`} className="user-row">
-        <td data-testid="user-row-name">
-          <span>
-            <Button
-              onClick={() =>
-                setCollapseStates({
-                  ...collapseStates,
-                  [userServerName]: !open,
-                })
-              }
-              aria-controls={`${userServerName}-collapse`}
-              aria-expanded={open}
-              data-testid={`${userServerName}-collapse-button`}
-              variant={open ? "secondary" : "primary"}
-              size="sm"
-            >
-              <span className="caret"></span>
-            </Button>{" "}
-          </span>
-          <span data-testid={`user-name-div-${userServerName}`}>
-            {user.name}
-          </span>
-        </td>
-        <td data-testid="user-row-admin">{user.admin ? "admin" : ""}</td>
-
-        <td data-testid="user-row-server">
-          <p className="text-secondary">{server.name}</p>
-        </td>
-        <td data-testid="user-row-last-activity">
-          {server.last_activity ? timeSince(server.last_activity) : "Never"}
-        </td>
-        <td data-testid="user-row-server-activity">
-          {server.ready ? (
-            // Stop Single-user server
-            <>
-              <StopServerButton serverName={server.name} userName={user.name} />
-              <AccessServerButton url={server.url} />
-            </>
-          ) : (
-            // Start Single-user server
-            <>
-              <StartServerButton
-                serverName={server.name}
-                userName={user.name}
-                style={{ marginRight: 20 }}
-              />
-              <a
-                href={`${base_url}spawn/${user.name}${
-                  server.name ? "/" + server.name : ""
-                }`}
-              >
-                <button
-                  className="btn btn-secondary btn-xs"
-                  style={{ marginRight: 20 }}
-                >
-                  Spawn Page
-                </button>
-              </a>
-            </>
-          )}
-        </td>
-        <EditUserCell user={user} />
-      </tr>,
-      <tr>
-        <td
-          colSpan={6}
-          style={{ padding: 0 }}
-          data-testid={`${userServerName}-td`}
+    return (
+      <Fragment key={`${userServerName}-row`}>
+        <tr
+          key={`${userServerName}-row`}
+          data-testid={`user-row-${userServerName}`}
+          className="user-row"
         >
-          <Collapse in={open} data-testid={`${userServerName}-collapse`}>
-            <CardGroup
-              id={`${userServerName}-card-group`}
-              style={{ width: "100%", margin: "0 auto", float: "none" }}
-            >
-              <Card style={{ width: "100%", padding: 3, margin: "0 auto" }}>
-                <Card.Title>User</Card.Title>
-                <ServerRowTable data={userNoServers} />
-              </Card>
-              <Card style={{ width: "100%", padding: 3, margin: "0 auto" }}>
-                <Card.Title>Server</Card.Title>
-                <ServerRowTable data={server} />
-              </Card>
-            </CardGroup>
-          </Collapse>
-        </td>
-      </tr>,
-    ];
+          <td data-testid="user-row-name">
+            <span>
+              <Button
+                onClick={() =>
+                  setCollapseStates({
+                    ...collapseStates,
+                    [userServerName]: !open,
+                  })
+                }
+                aria-controls={`${userServerName}-collapse`}
+                aria-expanded={open}
+                data-testid={`${userServerName}-collapse-button`}
+                variant={open ? "secondary" : "primary"}
+                size="sm"
+              >
+                <span className="fa fa-caret-down"></span>
+              </Button>{" "}
+            </span>
+            <span data-testid={`user-name-div-${userServerName}`}>
+              {user.name}
+            </span>
+          </td>
+          <td data-testid="user-row-admin">{user.admin ? "admin" : ""}</td>
+
+          <td data-testid="user-row-server">
+            <p className="text-secondary">{server.name}</p>
+          </td>
+          <td data-testid="user-row-last-activity">
+            {server.last_activity ? timeSince(server.last_activity) : "Never"}
+          </td>
+          <td data-testid="user-row-server-activity" className="actions">
+            <StartServerButton server={server} user={user} />
+            <StopServerButton server={server} user={user} />
+            <DeleteServerButton server={server} user={user} />
+            <AccessServerButton server={server} />
+            <SpawnPageButton server={server} user={user} />
+            <EditUserButton user={user} />
+          </td>
+        </tr>
+        <tr key={`${userServerName}-detail`}>
+          <td
+            colSpan={6}
+            style={{ padding: 0 }}
+            data-testid={`${userServerName}-td`}
+          >
+            <Collapse in={open} data-testid={`${userServerName}-collapse`}>
+              <CardGroup
+                id={`${userServerName}-card-group`}
+                style={{ width: "100%", margin: "0 auto", float: "none" }}
+              >
+                <Card style={{ width: "100%", padding: 3, margin: "0 auto" }}>
+                  <Card.Title>User</Card.Title>
+                  <ServerRowTable data={user} exclude={["server", "servers"]} />
+                </Card>
+                <Card style={{ width: "100%", padding: 3, margin: "0 auto" }}>
+                  <Card.Title>Server</Card.Title>
+                  <ServerRowTable data={server} />
+                </Card>
+              </CardGroup>
+            </Collapse>
+          </td>
+        </tr>
+      </Fragment>
+    );
   };
 
-  let servers = user_data.flatMap((user) => {
-    let userServers = Object.values({
+  ServerRow.propTypes = {
+    user: User,
+    server: Server,
+  };
+
+  const serverRows = user_data.flatMap((user) => {
+    const userServers = Object.values({
+      // eslint-disable-next-line react/prop-types
       "": user.server || {},
+      // eslint-disable-next-line react/prop-types
       ...(user.servers || {}),
     });
-    return userServers.map((server) => [user, server]);
+    return userServers.map((server) => ServerRow({ user, server }));
   });
 
   return (
     <div className="container" data-testid="container">
-      {errorAlert != null ? (
-        <div className="row">
-          <div className="col-md-10 col-md-offset-1 col-lg-8 col-lg-offset-2">
-            <div className="alert alert-danger">
-              {errorAlert}
-              <button
-                type="button"
-                className="close"
-                onClick={() => setErrorAlert(null)}
-              >
-                <span>&times;</span>
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : (
-        <></>
-      )}
+      <ErrorAlert errorAlert={errorAlert} setErrorAlert={setErrorAlert} />
       <div className="server-dashboard-container">
-        <Row>
+        <Row className="rows-cols-lg-auto g-3 mb-3 align-items-center">
           <Col md={4}>
             <FormControl
               type="text"
@@ -395,9 +499,32 @@ const ServerDashboard = (props) => {
               onChange={handleSearch}
             />
           </Col>
+          <Col md={4}>
+            <Form.Check
+              inline
+              title="check to only show running servers, otherwise show all"
+            >
+              <Form.Check.Input
+                type="checkbox"
+                name="active_servers"
+                id="active-servers-filter"
+                checked={state_filter == "active"}
+                onChange={(event) => {
+                  setStateFilter(event.target.checked ? "active" : null);
+                }}
+              />
+              <Form.Check.Label htmlFor="active-servers-filter">
+                {"only active servers"}
+              </Form.Check.Label>
+            </Form.Check>
+          </Col>
 
-          <Col md="auto" style={{ float: "right", margin: 15 }}>
-            <Link to="/groups">{"> Manage Groups"}</Link>
+          <Col md={{ span: 3, offset: 1 }}>
+            <Link to="/groups">
+              <Button variant="light" className="form-control">
+                {"Manage Groups"}
+              </Button>
+            </Link>
           </Col>
         </Row>
         <table className="table table-bordered table-hover">
@@ -406,41 +533,21 @@ const ServerDashboard = (props) => {
               <th id="user-header">
                 User{" "}
                 <SortHandler
-                  sorts={{ asc: usernameAsc, desc: usernameDesc }}
-                  callback={(method) => setSortMethod(() => method)}
+                  currentSort={sort}
+                  setSort={setSort}
+                  sortKey="name"
                   testid="user-sort"
                 />
               </th>
-              <th id="admin-header">
-                Admin{" "}
-                <SortHandler
-                  sorts={{ asc: adminAsc, desc: adminDesc }}
-                  callback={(method) => setSortMethod(() => method)}
-                  testid="admin-sort"
-                />
-              </th>
-              <th id="server-header">
-                Server{" "}
-                <SortHandler
-                  sorts={{ asc: usernameAsc, desc: usernameDesc }}
-                  callback={(method) => setSortMethod(() => method)}
-                  testid="server-sort"
-                />
-              </th>
+              <th id="admin-header">Admin</th>
+              <th id="server-header">Server</th>
               <th id="last-activity-header">
                 Last Activity{" "}
                 <SortHandler
-                  sorts={{ asc: dateAsc, desc: dateDesc }}
-                  callback={(method) => setSortMethod(() => method)}
+                  currentSort={sort}
+                  setSort={setSort}
+                  sortKey="last_activity"
                   testid="last-activity-sort"
-                />
-              </th>
-              <th id="running-status-header">
-                Running{" "}
-                <SortHandler
-                  sorts={{ asc: runningAsc, desc: runningDesc }}
-                  callback={(method) => setSortMethod(() => method)}
-                  testid="running-status-sort"
                 />
               </th>
               <th id="actions-header">Actions</th>
@@ -449,18 +556,19 @@ const ServerDashboard = (props) => {
           <tbody>
             <tr className="noborder">
               <td>
-                <Button variant="light" className="add-users-button">
-                  <Link to="/add-users">Add Users</Link>
-                </Button>
+                <Link to="/add-users">
+                  <Button variant="light" className="add-users-button">
+                    Add Users
+                  </Button>
+                </Link>
               </td>
-              <td></td>
-              <td></td>
-              <td>
+              <td colSpan={4} className="admin-header-buttons">
                 {/* Start all servers */}
                 <Button
                   variant="primary"
                   className="start-all"
                   data-testid="start-all"
+                  title="Start all default servers on the current page"
                   onClick={() => {
                     Promise.all(startAll(user_data.map((e) => e.name)))
                       .then((res) => {
@@ -477,17 +585,7 @@ const ServerDashboard = (props) => {
                         return res;
                       })
                       .then((res) => {
-                        updateUsers(...slice)
-                          .then((data) => {
-                            dispatchPageUpdate(
-                              data.items,
-                              data._pagination,
-                              name_filter,
-                            );
-                          })
-                          .catch(() =>
-                            setErrorAlert(`Failed to update users list.`),
-                          );
+                        loadPageData();
                         return res;
                       })
                       .catch(() => setErrorAlert(`Failed to start servers.`));
@@ -501,10 +599,12 @@ const ServerDashboard = (props) => {
                   variant="danger"
                   className="stop-all"
                   data-testid="stop-all"
+                  title="Stop all servers including named servers on the current page"
                   onClick={() => {
                     Promise.all(stopAll(user_data.map((e) => e.name)))
                       .then((res) => {
-                        let failedServers = res.filter((e) => !e.ok);
+                        // Array of arrays of servers for each user
+                        let failedServers = res.flat().filter((e) => !e.ok);
                         if (failedServers.length > 0) {
                           setErrorAlert(
                             `Failed to stop ${failedServers.length} ${
@@ -517,17 +617,7 @@ const ServerDashboard = (props) => {
                         return res;
                       })
                       .then((res) => {
-                        updateUsers(...slice)
-                          .then((data) => {
-                            dispatchPageUpdate(
-                              data.items,
-                              data._pagination,
-                              name_filter,
-                            );
-                          })
-                          .catch(() =>
-                            setErrorAlert(`Failed to update users list.`),
-                          );
+                        loadPageData();
                         return res;
                       })
                       .catch(() => setErrorAlert(`Failed to stop servers.`));
@@ -535,8 +625,8 @@ const ServerDashboard = (props) => {
                 >
                   Stop All
                 </Button>
-              </td>
-              <td>
+                {/* spacing between start/stop and Shutdown */}
+                <span style={{ marginLeft: "30px" }}> </span>
                 {/* Shutdown Jupyterhub */}
                 <Button
                   variant="danger"
@@ -547,16 +637,22 @@ const ServerDashboard = (props) => {
                 </Button>
               </td>
             </tr>
-            {servers.flatMap(([user, server]) => serverRow(user, server))}
+            {serverRows}
           </tbody>
         </table>
         <PaginationFooter
-          offset={offset}
+          // use user_page for display, which is what's on the page
+          // setOffset immediately updates url state and _requests_ an update
+          // but takes finite time before user_page is updated
+          offset={user_page.offset}
           limit={limit}
           visible={user_data.length}
           total={total}
-          next={() => setOffset(offset + limit)}
-          prev={() => setOffset(offset - limit)}
+          next={() => setOffset(user_page.offset + limit)}
+          prev={() =>
+            setOffset(limit > user_page.offset ? 0 : user_page.offset - limit)
+          }
+          handleLimit={handleLimit}
         />
         <br></br>
       </div>
@@ -565,47 +661,39 @@ const ServerDashboard = (props) => {
 };
 
 ServerDashboard.propTypes = {
-  user_data: PropTypes.array,
+  user_data: PropTypes.arrayOf(User),
   updateUsers: PropTypes.func,
   shutdownHub: PropTypes.func,
   startServer: PropTypes.func,
   stopServer: PropTypes.func,
+  deleteServer: PropTypes.func,
   startAll: PropTypes.func,
   stopAll: PropTypes.func,
   dispatch: PropTypes.func,
-  history: PropTypes.shape({
-    push: PropTypes.func,
-  }),
-  location: PropTypes.shape({
-    search: PropTypes.string,
-  }),
 };
 
 const SortHandler = (props) => {
-  var { sorts, callback, testid } = props;
+  const { currentSort, setSort, sortKey, testid } = props;
 
-  var [direction, setDirection] = useState(undefined);
-
+  const currentlySorted = currentSort && currentSort.endsWith(sortKey);
+  const descending = currentSort && currentSort.startsWith("-");
   return (
     <div
       className="sort-icon"
       data-testid={testid}
       onClick={() => {
-        if (!direction) {
-          callback(sorts.desc);
-          setDirection("desc");
-        } else if (direction == "asc") {
-          callback(sorts.desc);
-          setDirection("desc");
+        if (!currentlySorted) {
+          setSort(sortKey);
+        } else if (descending) {
+          setSort(sortKey);
         } else {
-          callback(sorts.asc);
-          setDirection("asc");
+          setSort("-" + sortKey);
         }
       }}
     >
-      {!direction ? (
+      {!currentlySorted ? (
         <FaSort />
-      ) : direction == "asc" ? (
+      ) : descending ? (
         <FaSortDown />
       ) : (
         <FaSortUp />
@@ -615,8 +703,9 @@ const SortHandler = (props) => {
 };
 
 SortHandler.propTypes = {
-  sorts: PropTypes.object,
-  callback: PropTypes.func,
+  currentSort: PropTypes.string,
+  setSort: PropTypes.func,
+  sortKey: PropTypes.string,
   testid: PropTypes.string,
 };
 

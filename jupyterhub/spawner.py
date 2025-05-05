@@ -1,6 +1,7 @@
 """
 Contains base Spawner class & default implementation
 """
+
 # Copyright (c) Jupyter Development Team.
 # Distributed under the terms of the Modified BSD License.
 import ast
@@ -11,14 +12,19 @@ import shutil
 import signal
 import sys
 import warnings
-from inspect import signature
+from inspect import isawaitable, signature
 from subprocess import Popen
 from tempfile import mkdtemp
 from textwrap import dedent
 from urllib.parse import urlparse
 
-from async_generator import aclosing
+if sys.version_info >= (3, 10):
+    from contextlib import aclosing
+else:
+    from async_generator import aclosing
+
 from sqlalchemy import inspect
+from tornado import web
 from tornado.ioloop import PeriodicCallback
 from traitlets import (
     Any,
@@ -43,8 +49,10 @@ from .traitlets import ByteSpecification, Callable, Command
 from .utils import (
     AnyTimeoutError,
     exponential_backoff,
+    fmt_ip_url,
     maybe_future,
     random_port,
+    recursive_update,
     url_escape_path,
     url_path_join,
 )
@@ -162,6 +170,9 @@ class Spawner(LoggingConfigurable):
     hub = Any()
     orm_spawner = Any()
     cookie_options = Dict()
+    cookie_host_prefix_enabled = Bool()
+    public_url = Unicode(help="Public URL of this spawner's server")
+    public_hub_url = Unicode(help="Public URL of the Hub itself")
 
     db = Any()
 
@@ -274,8 +285,6 @@ class Spawner(LoggingConfigurable):
     api_token = Unicode()
     oauth_client_id = Unicode()
 
-    oauth_scopes = List(Unicode())
-
     @property
     def oauth_scopes(self):
         warnings.warn(
@@ -300,6 +309,57 @@ class Spawner(LoggingConfigurable):
             f"access:servers!user={self.user.name}",
         ]
 
+    group_overrides = Union(
+        [Callable(), Dict()],
+        help="""
+        Override specific traitlets based on group membership of the user.
+
+        This can be a dict, or a callable that returns a dict. The keys of the dict
+        are *only* used for lexicographical sorting, to guarantee consistent
+        ordering of the overrides. If it is a callable, it may be async, and will
+        be passed one parameter - the spawner instance. It should return a dictionary.
+
+        The values of the dict are dicts with the following keys:
+
+        - `"groups"` - If the user belongs to *any* of these groups, these overrides are
+          applied to their server before spawning.
+        - `"spawner_override"` - a dictionary with overrides to apply to the Spawner
+          settings. Each value can be either the final value to change or a callable that
+          take the `Spawner` instance as parameter and returns the final value.
+          If the traitlet being overriden is a *dictionary*, the dictionary
+          will be *recursively updated*, rather than overriden. If you want to
+          remove a key, set its value to `None`.
+          
+        Example:
+
+            The following example config will:
+    
+            1. Add the environment variable "AM_I_GROUP_ALPHA" to everyone in the "group-alpha" group
+            2. Add the environment variable "AM_I_GROUP_BETA" to everyone in the "group-beta" group.
+               If a user is part of both "group-beta" and "group-alpha", they will get *both* these env
+               vars, due to the dictionary merging functionality.
+            3. Add a higher memory limit for everyone in the "group-beta" group.
+            
+            ::
+            
+                c.Spawner.group_overrides = {
+                    "01-group-alpha-env-add": {
+                        "groups": ["group-alpha"],
+                        "spawner_override": {"environment": {"AM_I_GROUP_ALPHA": "yes"}},
+                    },
+                    "02-group-beta-env-add": {
+                        "groups": ["group-beta"],
+                        "spawner_override": {"environment": {"AM_I_GROUP_BETA": "yes"}},
+                    },
+                    "03-group-beta-mem-limit": {
+                        "groups": ["group-beta"],
+                        "spawner_override": {"mem_limit": "2G"}
+                    }
+                }
+        """,
+        config=True,
+    )
+
     handler = Any()
 
     oauth_roles = Union(
@@ -307,14 +367,6 @@ class Spawner(LoggingConfigurable):
         help="""Allowed roles for oauth tokens.
 
         Deprecated in 3.0: use oauth_client_allowed_scopes
-
-        This sets the maximum and default roles
-        assigned to oauth tokens issued by a single-user server's
-        oauth client (i.e. tokens stored in browsers after authenticating with the server),
-        defining what actions the server can take on behalf of logged-in users.
-
-        Default is an empty list, meaning minimal permissions to identify users,
-        no actions can be taken on their behalf.
         """,
     ).tag(config=True)
 
@@ -327,6 +379,8 @@ class Spawner(LoggingConfigurable):
         oauth client (i.e. tokens stored in browsers after authenticating with the server),
         defining what actions the server can take on behalf of logged-in users.
 
+        Access to the current server will always be included in this list.
+        This property contains additional scopes.
         Default is an empty list, meaning minimal permissions to identify users,
         no actions can be taken on their behalf.
 
@@ -354,7 +408,7 @@ class Spawner(LoggingConfigurable):
             allowed_scopes = self.oauth_client_allowed_scopes
             if callable(allowed_scopes):
                 allowed_scopes = allowed_scopes(self)
-                if inspect.isawaitable(allowed_scopes):
+                if isawaitable(allowed_scopes):
                     allowed_scopes = await allowed_scopes
             scopes.extend(allowed_scopes)
 
@@ -382,6 +436,23 @@ class Spawner(LoggingConfigurable):
         scopes.append(f"access:servers!server={self.user.name}/{self.name}")
         return sorted(set(scopes))
 
+    server_token_scopes = Union(
+        [List(Unicode()), Callable()],
+        help="""The list of scopes to request for $JUPYTERHUB_API_TOKEN
+
+        If not specified, the scopes in the `server` role will be used
+        (unchanged from pre-4.0).
+
+        If callable, will be called with the Spawner instance as its sole argument
+        (JupyterHub user available as spawner.user).
+
+        JUPYTERHUB_API_TOKEN will be assigned the _subset_ of these scopes
+        that are held by the user (as in oauth_client_allowed_scopes).
+
+        .. versionadded:: 4.0
+        """,
+    ).tag(config=True)
+
     will_resume = Bool(
         False,
         help="""Whether the Spawner will resume on next start
@@ -400,19 +471,39 @@ class Spawner(LoggingConfigurable):
         The IP address (or hostname) the single-user server should listen on.
 
         Usually either '127.0.0.1' (default) or '0.0.0.0'.
+        On IPv6 only networks use '::1' or '::'.
+
+        If the spawned singleuser server is running JupyterHub 5.3.0 later
+        You can set this to the empty string '' to indicate both IPv4 and IPv6.
 
         The JupyterHub proxy implementation should be able to send packets to this interface.
 
         Subclasses which launch remotely or in containers
         should override the default to '0.0.0.0'.
 
+        .. versionchanged:: 5.3
+            An empty string '' means all interfaces (IPv4 and IPv6). Prior to this
+            the behaviour of '' was not defined.
+
         .. versionchanged:: 2.0
-            Default changed to '127.0.0.1', from ''.
-            In most cases, this does not result in a change in behavior,
-            as '' was interpreted as 'unspecified',
-            which used the subprocesses' own default, itself usually '127.0.0.1'.
+            Default changed to '127.0.0.1', from unspecified.
         """,
     ).tag(config=True)
+
+    @validate("ip")
+    def _strip_ipv6(self, proposal):
+        """
+        Prior to 5.3.0 it was necessary to use [] when specifying an
+        [ipv6] due to the IP being concatenated with the port when forming URLs
+        without [].
+
+        To avoid breaking existing workarounds strip [].
+        """
+        v = proposal["value"]
+        if v.startswith("[") and v.endswith("]"):
+            self.log.warning("Removing '[' ']' from Spawner.ip %s", self.ip)
+            v = v[1:-1]
+        return v
 
     port = Integer(
         0,
@@ -475,6 +566,20 @@ class Spawner(LoggingConfigurable):
         """,
     ).tag(config=True)
 
+    poll_jitter = Float(
+        0.1,
+        min=0,
+        max=1,
+        help="""
+        Jitter fraction for poll_interval.
+
+        Avoids alignment of poll calls for many Spawners,
+        e.g. when restarting JupyterHub, which restarts all polls for running Spawners.
+
+        `poll_jitter=0` means no jitter, 0.1 means 10%, etc.
+        """,
+    ).tag(config=True)
+
     _callbacks = List()
     _poll_callback = Any()
 
@@ -528,7 +633,8 @@ class Spawner(LoggingConfigurable):
 
         return options_form
 
-    options_from_form = Callable(
+    options_from_form = Union(
+        [Callable(), Unicode()],
         help="""
         Interpret HTTP form data
 
@@ -540,7 +646,8 @@ class Spawner(LoggingConfigurable):
         though it can contain bytes in addition to standard JSON data types.
 
         This method should not have any side effects.
-        Any handling of `user_options` should be done in `.start()`
+        Any handling of `user_options` should be done in `.apply_user_options()` (JupyterHub 5.3)
+        or `.start()` (JupyterHub 5.2 or older)
         to ensure consistent behavior across servers
         spawned via the API and form submission page.
 
@@ -554,15 +661,87 @@ class Spawner(LoggingConfigurable):
             (with additional support for bytes in case of uploaded file data),
             and any non-bytes non-jsonable values will be replaced with None
             if the user_options are re-used.
+
+        .. versionadded:: 5.3
+            The strings `'simple'` and `'passthrough'` may be specified to select some predefined behavior.
+            These are the only string values accepted.
+            
+            `'passthrough'` is the longstanding default behavior,
+            where form data is stored in `user_options` without modification.
+            With `'passthrough'`, `user_options` from a form will always be a dict of lists of strings.
+
+            `'simple'` applies some minimal processing that works for most simple forms:
+
+            - Single-value fields get unpacked from lists.
+              They are still always strings, no attempt is made to parse numbers, etc..
+            - Multi-value fields are left alone.
+            - The default checked value of "on" for a checkbox is converted to True.
+              This is the only non-string value that can be produced.
+
+            Example for `'simple'`::
+
+                {
+                    "image": ["myimage"],
+                    "checked": ["on"], # checkbox
+                    "multi-select": ["a", "b"],
+                }
+                # becomes
+                {
+                    "image": "myimage",
+                    "checked": True,
+                    "multi-select": ["a", "b"],
+                }
         """,
     ).tag(config=True)
 
     @default("options_from_form")
     def _options_from_form(self):
-        return self._default_options_from_form
+        return self._passthrough_options_from_form
 
-    def _default_options_from_form(self, form_data):
+    @validate("options_from_form")
+    def _validate_options_from_form(self, proposal):
+        # coerce special string values to callable
+        if proposal.value == "passthrough":
+            return self._passthrough_options_from_form
+        elif proposal.value == "simple":
+            return self._simple_options_from_form
+        else:
+            return proposal.value
+
+    @staticmethod
+    def _passthrough_options_from_form(form_data):
+        """The longstanding default behavior for options_from_form
+
+        explicit opt-in via `options_from_form = 'passthrough'`
+        """
         return form_data
+
+    @staticmethod
+    def _simple_options_from_form(form_data):
+        """Simple options_from_form
+
+        Enable via `options_from_form = 'simple'
+
+        Transforms simple single-value string inputs to actual strings,
+        when they arrive as length-1 lists.
+
+        The default "checked" value of "on" for checkboxes is converted to True.
+        Note: when a checkbox is unchecked in a form, its value is generally omitted, not set to any false value.
+
+        Multi-value inputs are left unmodifed as lists of strings.
+        """
+        user_options = {}
+        for key, value_list in form_data.items():
+            if len(value_list) == 1:
+                value = value_list[0]
+                if value == "on":
+                    # default for checkbox
+                    value = True
+            else:
+                value = value_list
+
+            user_options[key] = value
+        return user_options
 
     def run_options_from_form(self, form_data):
         sig = signature(self.options_from_form)
@@ -602,26 +781,145 @@ class Spawner(LoggingConfigurable):
         """
         return self.options_from_form(query_data)
 
+    apply_user_options = Union(
+        [Callable(), Dict()],
+        config=True,
+        default_value=None,
+        allow_none=True,
+        help="""
+            Hook to apply inputs from user_options to the Spawner.
+
+            Typically takes values in user_options, validates them, and updates Spawner attributes::
+
+                def apply_user_options(spawner, user_options):
+                    if "image" in user_options and isinstance(user_options["image"], str):
+                        spawner.image = user_options["image"]
+
+                c.Spawner.apply_user_options = apply_user_options
+
+            `apply_user_options` *may* be async.
+
+            Default: do nothing.
+
+            Typically a callable which takes `(spawner: Spawner, user_options: dict)`,
+            but for simple cases this can be a dict mapping user option fields to Spawner attribute names,
+            e.g.::
+
+                c.Spawner.apply_user_options = {"image_input": "image"}
+                c.Spawner.options_from_form = "simple"
+
+            allows users to specify the image attribute, but not any others.
+            Because `user_options` generally comes in as strings in form data,
+            the dictionary mode uses traitlets `from_string` to coerce strings to values,
+            which allows setting simple values from strings (e.g. numbers)
+            without needing to implement callable hooks.
+
+            .. note::
+
+                Because `user_options` is user input
+                and may be set directly via the REST API,
+                no assumptions should be made on its structure or contents.
+                An empty dict should always be supported.
+                Make sure to validate any inputs before applying them,
+                either in this callable, or in whatever is consuming the value
+                if this is a dict.
+        
+            .. versionadded:: 5.3
+        
+                Prior to 5.3, applying user options must be done in `Spawner.start()`
+                or `Spawner.pre_spawn_hook()`.
+            """,
+    )
+
+    async def _run_apply_user_options(self, user_options):
+        """Run the apply_user_options hook
+
+        and turn errors into HTTP 400
+        """
+        r = None
+        try:
+            if isinstance(self.apply_user_options, dict):
+                r = self._apply_user_options_dict(user_options)
+            elif self.apply_user_options:
+                r = self.apply_user_options(self, user_options)
+            elif user_options:
+                keys = list(user_options)
+                self.log.warning(
+                    f"Received unhandled user_options for {self._log_name}: {', '.join(keys)}"
+                )
+            if isawaitable(r):
+                await r
+        except Exception as e:
+            # this may not be the users' fault...
+            # should we catch less?
+            # likely user errors are ValueError, TraitError, TypeError
+            self.log.exception("Exception applying user_options for %s", self._log_name)
+            if isinstance(e, web.HTTPError):
+                # passthrough hook's HTTPError, so it can display a custom message
+                raise
+            else:
+                raise web.HTTPError(400, "Invalid user options")
+
+    def _apply_user_options_dict(self, user_options):
+        """if apply_user_options is a dict
+
+        Allows fully declarative apply_user_options configuration
+        for simple cases where users may set attributes directly
+        from values in user_options.
+        """
+        traits = self.traits()
+        for key, value in user_options.items():
+            attr = self.apply_user_options.get(key, None)
+            if attr is None:
+                self.log.warning(f"Unhandled user option {key} for {self._log_name}")
+            elif hasattr(self, attr):
+                # require traits? I think not, but we should require declaration, at least
+                # use trait from_string for string coercion if available, though
+                try:
+                    setattr(self, attr, value)
+                except Exception as e:
+                    # try coercion from string via traits
+                    # this will mostly affect numbers
+                    if attr in traits and isinstance(value, str):
+                        # try coercion, may not work
+                        try:
+                            value = traits[attr].from_string(value)
+                        except Exception:
+                            # raise original assignment error, likely more informative
+                            raise e
+                        else:
+                            setattr(self, attr, value)
+                    else:
+                        raise
+            else:
+                self.log.error(
+                    f"No such Spawner attribute {attr} for user option {key} on {self._log_name}"
+                )
+
     user_options = Dict(
         help="""
         Dict of user specified options for the user's spawned instance of a single-user server.
 
         These user options are usually provided by the `options_form` displayed to the user when they start
         their server.
+        If specified via an `options_form`, form data is passed through `options_from_form` before storing
+        in `user_options`.
+        `user_options` may also be passed as the JSON body to a spawn request via the REST API,
+        in which case it is stored directly, unmodifed.
+        
+        `user_options` has no effect on its own, it must be handled by the Spawner in `spawner.start`,
+        or via deployment configuration in `apply_user_options` or `pre_spawn_hook`.
+        
+        .. seealso::
+        
+            - :attr:`options_form`
+            - :attr:`options_from_form`
+            - :attr:`apply_user_options`
         """
     )
 
     env_keep = List(
-        [
-            'PATH',
-            'PYTHONPATH',
-            'CONDA_ROOT',
-            'CONDA_DEFAULT_ENV',
-            'VIRTUAL_ENV',
-            'LANG',
-            'LC_ALL',
-            'JUPYTERHUB_SINGLEUSER_APP',
-        ],
+        ['JUPYTERHUB_SINGLEUSER_APP'],
         help="""
         List of environment variables for the single-user server to inherit from the JupyterHub process.
 
@@ -823,6 +1121,27 @@ class Spawner(LoggingConfigurable):
         """,
     ).tag(config=True)
 
+    progress_ready_hook = Any(
+        help="""
+        An optional hook function that you can implement to modify the
+        ready event, which will be shown to the user on the spawn progress page when their server
+        is ready.
+
+        This can be set independent of any concrete spawner implementation.
+
+        This maybe a coroutine.
+
+        Example::
+
+            async def my_ready_hook(spawner, ready_event):
+                ready_event["html_message"] = f"Server {spawner.name} is ready for {spawner.user.name}"
+                return ready_event
+
+            c.Spawner.progress_ready_hook = my_ready_hook
+
+        """
+    ).tag(config=True)
+
     pre_spawn_hook = Any(
         help="""
         An optional hook function that you can implement to do some
@@ -835,10 +1154,9 @@ class Spawner(LoggingConfigurable):
 
         Example::
 
-            from subprocess import check_call
             def my_hook(spawner):
                 username = spawner.user.name
-                check_call(['./examples/bootstrap-script/bootstrap.sh', username])
+                spawner.environment["GREETING"] = f"Hello {username}"
 
             c.Spawner.pre_spawn_hook = my_hook
 
@@ -937,7 +1255,7 @@ class Spawner(LoggingConfigurable):
         env = {}
         if self.env:
             warnings.warn(
-                "Spawner.env is deprecated, found %s" % self.env, DeprecationWarning
+                f"Spawner.env is deprecated, found {self.env}", DeprecationWarning
             )
             env.update(self.env)
 
@@ -954,6 +1272,10 @@ class Spawner(LoggingConfigurable):
         env['JUPYTERHUB_CLIENT_ID'] = self.oauth_client_id
         if self.cookie_options:
             env['JUPYTERHUB_COOKIE_OPTIONS'] = json.dumps(self.cookie_options)
+
+        env["JUPYTERHUB_COOKIE_HOST_PREFIX_ENABLED"] = str(
+            int(self.cookie_host_prefix_enabled)
+        )
         env['JUPYTERHUB_HOST'] = self.hub.public_host
         env['JUPYTERHUB_OAUTH_CALLBACK_URL'] = url_path_join(
             self.user.url, url_escape_path(self.name), 'oauth_callback'
@@ -995,8 +1317,12 @@ class Spawner(LoggingConfigurable):
             base_url = '/'
 
         proto = 'https' if self.internal_ssl else 'http'
-        bind_url = f"{proto}://{self.ip}:{self.port}{base_url}"
+        bind_url = f"{proto}://{fmt_ip_url(self.ip)}:{self.port}{base_url}"
         env["JUPYTERHUB_SERVICE_URL"] = bind_url
+
+        # the public URLs of this server and the Hub
+        env["JUPYTERHUB_PUBLIC_URL"] = self.public_url
+        env["JUPYTERHUB_PUBLIC_HUB_URL"] = self.public_hub_url
 
         # Put in limit and guarantee info if they exist.
         # Note that this is for use by the humans / notebook extensions in the
@@ -1331,12 +1657,13 @@ class Spawner(LoggingConfigurable):
         raise NotImplementedError("Override in subclass. Must be a coroutine.")
 
     def delete_forever(self):
-        """Called when a user or server is deleted.
+        """Called when a user or named server is deleted.
 
         This can do things like request removal of resources such as persistent storage.
-        Only called on stopped spawners, and is usually the last action ever taken for the user.
+        Spawners must already be stopped before this method can be called.
 
         Will only be called once on each Spawner, immediately prior to removal.
+        Can be async.
 
         Stopping a server does *not* call this method.
         """
@@ -1369,7 +1696,9 @@ class Spawner(LoggingConfigurable):
         self.stop_polling()
 
         self._poll_callback = PeriodicCallback(
-            self.poll_and_notify, 1e3 * self.poll_interval
+            self.poll_and_notify,
+            1e3 * self.poll_interval,
+            jitter=self.poll_jitter,
         )
         self._poll_callback.start()
 
@@ -1412,6 +1741,48 @@ class Spawner(LoggingConfigurable):
         except AnyTimeoutError:
             return False
 
+    def _apply_overrides(self, spawner_override: dict):
+        """
+        Apply set of overrides onto the current spawner instance
+
+        spawner_override is a dict with key being the name of the traitlet
+        to override, and value is either a callable or the value for the
+        traitlet. If the value is a dictionary, it is *merged* with the
+        existing value (rather than replaced). Callables are called with
+        one parameter - the current spawner instance.
+        """
+        for k, v in spawner_override.items():
+            if callable(v):
+                v = v(self)
+
+            # If v is a dict, *merge* it with existing values, rather than completely
+            # resetting it. This allows *adding* things like environment variables rather
+            # than completely replacing them. If value is set to None, the key
+            # will be removed
+            if isinstance(v, dict) and isinstance(getattr(self, k), dict):
+                recursive_update(getattr(self, k), v)
+            else:
+                setattr(self, k, v)
+
+    async def apply_group_overrides(self):
+        """
+        Apply group overrides before starting a server
+        """
+        user_group_names = {g.name for g in self.user.groups}
+        if callable(self.group_overrides):
+            group_overrides = await maybe_future(self.group_overrides(self))
+        else:
+            group_overrides = self.group_overrides
+        for key in sorted(group_overrides):
+            go = group_overrides[key]
+            if user_group_names & set(go['groups']):
+                # If there is *any* overlap between the groups user is in
+                # and the groups for this override, apply overrides
+                self.log.info(
+                    f"Applying group_override {key} for {self.user.name}, modifying config keys: {' '.join(go['spawner_override'].keys())}"
+                )
+                self._apply_overrides(go['spawner_override'])
+
 
 def _try_setcwd(path):
     """Try to set CWD to path, walking up until a valid directory is found.
@@ -1427,7 +1798,7 @@ def _try_setcwd(path):
             path, _ = os.path.split(path)
         else:
             return
-    print("Couldn't set CWD at all (%s), using temp dir" % exc, file=sys.stderr)
+    print(f"Couldn't set CWD at all ({exc}), using temp dir", file=sys.stderr)
     td = mkdtemp()
     os.chdir(td)
 
@@ -1438,14 +1809,13 @@ def set_user_setuid(username, chdir=True):
     Returned preexec_fn will set uid/gid, and attempt to chdir to the target user's
     home directory.
     """
-    import grp
     import pwd
 
     user = pwd.getpwnam(username)
     uid = user.pw_uid
     gid = user.pw_gid
     home = user.pw_dir
-    gids = [g.gr_gid for g in grp.getgrall() if username in g.gr_mem]
+    gids = os.getgrouplist(username, gid)
 
     def preexec():
         """Set uid/gid of current process
@@ -1458,7 +1828,7 @@ def set_user_setuid(username, chdir=True):
         try:
             os.setgroups(gids)
         except Exception as e:
-            print('Failed to set groups %s' % e, file=sys.stderr)
+            print(f'Failed to set groups {e}', file=sys.stderr)
         os.setuid(uid)
 
         # start in the user's home dir
@@ -1555,6 +1925,20 @@ class LocalProcessSpawner(Spawner):
         The process id (pid) of the single-user server process spawned for current user.
         """,
     )
+
+    @default("env_keep")
+    def _env_keep_default(self):
+        return [
+            "CONDA_DEFAULT_ENV",
+            "CONDA_ROOT",
+            "JUPYTERHUB_SINGLEUSER_APP",
+            "LANG",
+            "LC_ALL",
+            "LD_LIBRARY_PATH",
+            "PATH",
+            "PYTHONPATH",
+            "VIRTUAL_ENV",
+        ]
 
     def make_preexec_fn(self, name):
         """
@@ -1718,7 +2102,7 @@ class LocalProcessSpawner(Spawner):
             self.clear_state()
             return 0
 
-        # We use pustil.pid_exists on windows
+        # We use psutil.pid_exists on windows
         if os.name == 'nt':
             alive = psutil.pid_exists(self.pid)
         else:

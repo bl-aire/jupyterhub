@@ -6,6 +6,10 @@
 It is recommended to use at least JupyterLab 3.6 with JupyterHub >= 3.1.1 for this.
 :::
 
+:::{note}
+Starting with JupyterLab >=4.0, installing the [jupyter-collaboration](https://github.com/jupyterlab/jupyter-collaboration) package in your single-user environment enables collaborative mode, instead of passing the `--collaborative` flag at runtime.
+:::
+
 JupyterLab has support for real-time collaboration (RTC), where multiple users are working with the same Jupyter server and see each other's edits.
 Beyond other collaborative-editing environments, Jupyter includes _execution_.
 So granting someone access to your server also means granting them access to **run code as you**.
@@ -74,7 +78,7 @@ c.JupyterHub.load_roles = []
 c.JupyterHub.load_groups = {
     # collaborative accounts get added to this group
     # so it's easy to see which accounts are collaboration accounts
-    "collaborative": [],
+    "collaborative": {"users": []},
 }
 ```
 
@@ -98,12 +102,12 @@ for project_name, project in project_config["projects"].items():
     members = project.get("members", [])
     print(f"Adding project {project_name} with members {members}")
     # add them to a group for the project
-    c.JupyterHub.load_groups[project_name] = members
+    c.JupyterHub.load_groups[project_name] = {"users": members}
     # define a new user for the collaboration
     collab_user = f"{project_name}-collab"
     # add the collab user to the 'collaborative' group
     # so we can identify it as a collab account
-    c.JupyterHub.load_groups["collaborative"].append(collab_user)
+    c.JupyterHub.load_groups["collaborative"]["users"].append(collab_user)
 
     # finally, grant members of the project collaboration group
     # access to the collab user's server,
@@ -123,6 +127,8 @@ for project_name, project in project_config["projects"].items():
 ```
 
 The `members` step could be skipped if group membership is managed by the authenticator, or handled via the admin UI later, in which case we only need to handle group _creation_ and role assignment.
+
+This configuration code runs when jupyterhub starts up, and as noted above, users and groups cannot have their role assignments change without restarting JupyterHub. If new collaboration groups are created (within configuration, via the admin page, or via the Authenticator), the hub will need to be restarted in order for it to load roles for those new groups.
 
 ### Distinguishing collaborative servers
 

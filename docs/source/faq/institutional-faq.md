@@ -1,3 +1,5 @@
+(faq:institutional)=
+
 # Institutional FAQ
 
 This page contains common questions from users of JupyterHub,
@@ -64,9 +66,9 @@ industry, and government research labs. It is most-commonly used by two kinds of
 Here is a sample of organizations that use JupyterHub:
 
 - **Universities and colleges**: UC Berkeley, UC San Diego, Cal Poly SLO, Harvard University, University of Chicago,
-  University of Oslo, University of Sheffield, Université Paris Sud, University of Versailles
+  University of Oslo, University of Sheffield, Université Paris Sud, University of Versailles, University of Portland
 - **Research laboratories**: NASA, NCAR, NOAA, the Large Synoptic Survey Telescope, Brookhaven National Lab,
-  Minnesota Supercomputing Institute, ALCF, CERN, Lawrence Livermore National Laboratory
+  Minnesota Supercomputing Institute, ALCF, CERN, Lawrence Livermore National Laboratory, HUNT
 - **Online communities**: Pangeo, Quantopian, mybinder.org, MathHub, Open Humans
 - **Computing infrastructure providers**: NERSC, San Diego Supercomputing Center, Compute Canada
 - **Companies**: Capital One, SANDVIK code, Globus
@@ -124,13 +126,13 @@ as more resources are needed - allowing you to utilize the benefits of a flexibl
 
 ### Is JupyterHub secure?
 
-The short answer: yes.  
+The short answer: yes.
 JupyterHub as a standalone application has been battle-tested at an institutional
 level for several years, and makes a number of "default" security decisions that are reasonable for most
 users.
 
 - For security considerations in the base JupyterHub application,
-  [see the JupyterHub security page](https://jupyterhub.readthedocs.io/en/stable/reference/websecurity.html).
+  [see the JupyterHub security page](explanation:security).
 - For security considerations when deploying JupyterHub on Kubernetes, see the
   [JupyterHub on Kubernetes security page](https://z2jh.jupyter.org/en/latest/security.html).
 

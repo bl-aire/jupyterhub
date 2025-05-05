@@ -1,4 +1,5 @@
 """Tests for named servers"""
+
 import asyncio
 import json
 import time
@@ -68,6 +69,12 @@ async def test_default_server(app, named_servers):
     r.raise_for_status()
 
     user_model = normalize_user(r.json())
+    full_progress_url = None
+    if app.public_url:
+        full_progress_url = url_path_join(
+            app.public_url,
+            f'hub/api/users/{username}/server/progress',
+        )
     assert user_model == fill_user(
         {
             'name': username,
@@ -76,6 +83,7 @@ async def test_default_server(app, named_servers):
             'server': user.url,
             'servers': {
                 '': {
+                    'full_name': f"{username}/",
                     'name': '',
                     'started': TIMESTAMP,
                     'last_activity': TIMESTAMP,
@@ -83,11 +91,11 @@ async def test_default_server(app, named_servers):
                     'pending': None,
                     'ready': True,
                     'stopped': False,
-                    'progress_url': 'PREFIX/hub/api/users/{}/server/progress'.format(
-                        username
-                    ),
+                    'progress_url': f'PREFIX/hub/api/users/{username}/server/progress',
                     'state': {'pid': 0},
                     'user_options': {},
+                    'full_url': user.public_url() or None,
+                    'full_progress_url': full_progress_url,
                 }
             },
         }
@@ -157,6 +165,14 @@ async def test_create_named_server(
     assert db_server_names == {"", servername}
 
     user_model = normalize_user(r.json())
+
+    full_progress_url = None
+    if app.public_url:
+        full_progress_url = url_path_join(
+            app.public_url,
+            f'hub/api/users/{username}/servers/{escapedname}/progress',
+        )
+
     assert user_model == fill_user(
         {
             'name': username,
@@ -164,6 +180,7 @@ async def test_create_named_server(
             'auth_state': None,
             'servers': {
                 servername: {
+                    'full_name': f"{username}/{servername}",
                     'name': name,
                     'started': TIMESTAMP,
                     'last_activity': TIMESTAMP,
@@ -171,11 +188,11 @@ async def test_create_named_server(
                     'pending': None,
                     'ready': True,
                     'stopped': False,
-                    'progress_url': 'PREFIX/hub/api/users/{}/servers/{}/progress'.format(
-                        username, escapedname
-                    ),
+                    'progress_url': f'PREFIX/hub/api/users/{username}/servers/{escapedname}/progress',
                     'state': {'pid': 0},
                     'user_options': {},
+                    'full_url': user.public_url(name) or None,
+                    'full_progress_url': full_progress_url,
                 }
                 for name in [servername]
             },

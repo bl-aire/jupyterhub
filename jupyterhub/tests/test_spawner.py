@@ -1,4 +1,5 @@
 """Tests for process spawning"""
+
 # Copyright (c) Jupyter Development Team.
 # Distributed under the terms of the Modified BSD License.
 import asyncio
@@ -18,12 +19,11 @@ from .. import orm
 from .. import spawner as spawnermod
 from ..objects import Hub, Server
 from ..scopes import access_scopes
-from ..spawner import LocalProcessSpawner, Spawner
+from ..spawner import SimpleLocalProcessSpawner, Spawner
 from ..user import User
-from ..utils import AnyTimeoutError, new_token, url_path_join
+from ..utils import AnyTimeoutError, maybe_future, new_token, url_path_join
 from .mocking import public_url
-from .test_api import add_user
-from .utils import async_requests
+from .utils import add_user, async_requests, find_user
 
 _echo_sleep = """
 import sys, time
@@ -46,7 +46,7 @@ def setup():
 
 
 def new_spawner(db, **kwargs):
-    user = kwargs.setdefault('user', User(db.query(orm.User).first(), {}))
+    user = kwargs.setdefault("user", User(db.query(orm.User).one(), {}))
     kwargs.setdefault('cmd', [sys.executable, '-c', _echo_sleep])
     kwargs.setdefault('hub', Hub())
     kwargs.setdefault('notebook_dir', os.getcwd())
@@ -56,7 +56,7 @@ def new_spawner(db, **kwargs):
     kwargs.setdefault('term_timeout', 1)
     kwargs.setdefault('kill_timeout', 1)
     kwargs.setdefault('poll_interval', 1)
-    return user._new_spawner('', spawner_class=LocalProcessSpawner, **kwargs)
+    return user._new_spawner('', spawner_class=SimpleLocalProcessSpawner, **kwargs)
 
 
 async def test_spawner(db, request):
@@ -220,8 +220,8 @@ def test_string_formatting(db):
     name = s.user.name
     assert s.notebook_dir == 'user/{username}/'
     assert s.default_url == '/base/{username}'
-    assert s.format_string(s.notebook_dir) == 'user/%s/' % name
-    assert s.format_string(s.default_url) == '/base/%s' % name
+    assert s.format_string(s.notebook_dir) == f'user/{name}/'
+    assert s.format_string(s.default_url) == f'/base/{name}'
 
 
 async def test_popen_kwargs(db):
@@ -260,7 +260,7 @@ async def test_shell_cmd(db, tmpdir, request):
     s.server.port = port
     db.commit()
     await wait_for_spawner(s)
-    r = await async_requests.get('http://%s:%i/env' % (ip, port))
+    r = await async_requests.get(f'http://{ip}:{port}/env')
     r.raise_for_status()
     env = r.json()
     assert env['TESTVAR'] == 'foo'
@@ -336,6 +336,12 @@ async def test_spawner_insert_api_token(app):
     assert found
     assert found.user.name == user.name
     assert user.api_tokens == [found]
+    # resolve `!server` filter in server role
+    server_role_scopes = {
+        s.replace("!server", f"!server={user.name}/")
+        for s in orm.Role.find(app.db, "server").scopes
+    }
+    assert set(found.scopes) == server_role_scopes
     await user.stop()
 
 
@@ -359,6 +365,62 @@ async def test_spawner_bad_api_token(app):
         await user.spawn()
     assert orm.APIToken.find(app.db, other_token) is None
     assert other_user.api_tokens == []
+
+
+@pytest.mark.parametrize(
+    "have_scopes, request_scopes, expected_scopes",
+    [
+        (["self"], ["inherit"], ["inherit"]),
+        (["self"], [], ["access:servers!server=USER/", "users:activity!user"]),
+        (
+            ["self"],
+            ["admin:groups", "read:servers!server"],
+            ["users:activity!user", "read:servers!server=USER/"],
+        ),
+        (
+            ["self", "read:groups!group=x", "users:activity"],
+            ["admin:groups", "users:activity"],
+            [
+                "read:groups!group=x",
+                "read:groups:name!group=x",
+                "users:activity",
+            ],
+        ),
+    ],
+)
+async def test_server_token_scopes(
+    app, username, create_user_with_scopes, have_scopes, request_scopes, expected_scopes
+):
+    """Token provided by spawner is not in the db
+
+    Insert token into db as a user-provided token.
+    """
+    db = app.db
+
+    # apply templating
+    def _format_scopes(scopes):
+        if callable(scopes):
+
+            async def get_scopes(*args):
+                return _format_scopes(await maybe_future(scopes(*args)))
+
+            return get_scopes
+
+        return [s.replace("USER", username) for s in scopes]
+
+    have_scopes = _format_scopes(have_scopes)
+    request_scopes = _format_scopes(request_scopes)
+    expected_scopes = _format_scopes(expected_scopes)
+
+    user = create_user_with_scopes(*have_scopes, name=username)
+    spawner = user.spawner
+    spawner.server_token_scopes = request_scopes
+
+    await user.spawn()
+    orm_token = orm.APIToken.find(db, spawner.api_token)
+    assert orm_token
+    assert set(orm_token.scopes) == set(expected_scopes)
+    await user.stop()
 
 
 async def test_spawner_delete_server(app):
@@ -433,7 +495,7 @@ async def test_hub_connect_url(db):
     assert env["JUPYTERHUB_API_URL"] == "https://example.com/api"
     assert (
         env["JUPYTERHUB_ACTIVITY_URL"]
-        == "https://example.com/api/users/%s/activity" % name
+        == f"https://example.com/api/users/{name}/activity"
     )
 
 
@@ -462,14 +524,53 @@ async def test_spawner_oauth_roles_bad(app, user):
 
 async def test_spawner_options_from_form(db):
     def options_from_form(form_data):
-        return form_data
+        options = {}
+        for key, value in form_data.items():
+            options[key] = value[0]
+        options["default"] = "added"
+        return options
 
     spawner = new_spawner(db, options_from_form=options_from_form)
     form_data = {"key": ["value"]}
     result = spawner.run_options_from_form(form_data)
-    for key, value in form_data.items():
-        assert key in result
-        assert result[key] == value
+    assert result == {
+        "key": "value",
+        "default": "added",
+    }
+
+
+@pytest.mark.parametrize(
+    "options_from_form, expected",
+    [
+        pytest.param(None, "unchanged", id="default"),
+        pytest.param("passthrough", "unchanged", id="passthrough"),
+        pytest.param(
+            "simple",
+            {
+                "single": "value",
+                "multiple": ["a", "b"],
+                "checkbox": True,
+                "number": "1",
+            },
+            id="simple",
+        ),
+    ],
+)
+async def test_predefined_options_from_form(db, options_from_form, expected):
+    kwargs = {}
+    if options_from_form:
+        kwargs["options_from_form"] = options_from_form
+    spawner = new_spawner(db, **kwargs)
+    form_data = {
+        "single": ["value"],
+        "multiple": ["a", "b"],
+        "checkbox": ["on"],
+        "number": ["1"],
+    }
+    if expected == "unchanged":
+        expected = form_data
+    result = spawner.run_options_from_form(form_data)
+    assert result == expected
 
 
 async def test_spawner_options_from_form_with_spawner(db):
@@ -482,6 +583,44 @@ async def test_spawner_options_from_form_with_spawner(db):
     for key, value in form_data.items():
         assert key in result
         assert result[key] == value
+
+
+async def test_apply_user_options_dict(db):
+    apply_user_options = {
+        # from_string doesn't work,
+        # but string assignment does
+        "mem": "mem_limit",
+        "notebook_dir": "notebook_dir",
+        "term_timeout": "term_timeout",
+        "start_timeout": "start_timeout",
+        "environment": "environment",
+        "unsupported": "unsupported",
+    }
+    user_options = {
+        "mem": "1G",
+        "notebook_dir": "/tmp",
+        "term_timeout": 1,
+        "start_timeout": "10",
+        "environment": {
+            "key": "value",
+        },
+        # shouldn't set these values:
+        # unsupported, but declared;
+        "unsupported": 5,
+        # undeclared, but available
+        "cpu_limit": "1m",
+    }
+    if sys.version_info < (3, 9):
+        # traitlets added `from_string` after requiring Python 3.9
+        user_options["start_timeout"] = int(user_options["start_timeout"])
+    spawner = new_spawner(db, apply_user_options=apply_user_options)
+    await spawner._run_apply_user_options(user_options)
+    assert spawner.mem_limit == 1 << 30
+    assert spawner.notebook_dir == "/tmp"
+    assert spawner.term_timeout == 1
+    assert spawner.environment == {"key": "value"}
+    assert not hasattr(spawner, "unsupported")
+    assert spawner.cpu_limit is None
 
 
 def test_spawner_server(db):
@@ -535,3 +674,123 @@ def test_spawner_server(db):
     spawner.server = Server.from_url("http://1.2.3.4")
     assert spawner.server is not None
     assert spawner.server.ip == "1.2.3.4"
+
+
+async def test_group_override(app):
+    app.load_groups = {
+        "admin": {"users": ["admin"]},
+        "user": {"users": ["admin", "user"]},
+    }
+    await app.init_groups()
+
+    group_overrides = {
+        "01-admin-mem-limit": {
+            "groups": ["admin"],
+            "spawner_override": {"start_timeout": 120},
+        }
+    }
+
+    admin_user = find_user(app.db, "admin")
+    s = Spawner(user=admin_user)
+    s.start_timeout = 60
+    s.group_overrides = group_overrides
+    await s.apply_group_overrides()
+    assert s.start_timeout == 120
+
+    non_admin_user = find_user(app.db, "user")
+    s = Spawner(user=non_admin_user)
+    s.start_timeout = 60
+    s.group_overrides = group_overrides
+    await s.apply_group_overrides()
+    assert s.start_timeout == 60
+
+
+async def test_group_override_lexical_ordering(app):
+    app.load_groups = {
+        "admin": {"users": ["admin"]},
+        "user": {"users": ["admin", "user"]},
+    }
+    await app.init_groups()
+
+    group_overrides = {
+        # this should be applied last, even though it is specified first,
+        # due to lexical ordering based on key names
+        "02-admin-mem-limit": {
+            "groups": ["admin"],
+            "spawner_override": {"start_timeout": 300},
+        },
+        "01-admin-mem-limit": {
+            "groups": ["admin"],
+            "spawner_override": {"start_timeout": 120},
+        },
+    }
+
+    admin_user = find_user(app.db, "admin")
+    s = Spawner(user=admin_user)
+    s.start_timeout = 60
+    s.group_overrides = group_overrides
+    await s.apply_group_overrides()
+    assert s.start_timeout == 300
+
+
+async def test_group_override_dict_merging(app):
+    app.load_groups = {
+        "admin": {"users": ["admin"]},
+        "user": {"users": ["admin", "user"]},
+    }
+    await app.init_groups()
+
+    group_overrides = {
+        "01-admin-env-add": {
+            "groups": ["admin"],
+            "spawner_override": {"environment": {"AM_I_ADMIN": "yes"}},
+        },
+        "02-user-env-add": {
+            "groups": ["user"],
+            "spawner_override": {"environment": {"AM_I_USER": "yes"}},
+        },
+    }
+
+    admin_user = find_user(app.db, "admin")
+    s = Spawner(user=admin_user)
+    s.group_overrides = group_overrides
+    await s.apply_group_overrides()
+    assert s.environment["AM_I_ADMIN"] == "yes"
+    assert s.environment["AM_I_USER"] == "yes"
+
+    admin_user = find_user(app.db, "user")
+    s = Spawner(user=admin_user)
+    s.group_overrides = group_overrides
+    await s.apply_group_overrides()
+    assert s.environment["AM_I_USER"] == "yes"
+    assert "AM_I_ADMIN" not in s.environment
+
+
+async def test_group_override_callable(app):
+    app.load_groups = {
+        "admin": {"users": ["admin"]},
+        "user": {"users": ["admin", "user"]},
+    }
+    await app.init_groups()
+
+    def group_overrides(spawner):
+        return {
+            "01-admin-mem-limit": {
+                "groups": ["admin"],
+                "spawner_override": {"start_timeout": 120},
+            }
+        }
+
+    admin_user = find_user(app.db, "admin")
+    s = Spawner(user=admin_user)
+    s.start_timeout = 60
+    s.group_overrides = group_overrides
+    await s.apply_group_overrides()
+    assert s.start_timeout == 120
+
+    non_admin_user = find_user(app.db, "user")
+    s = Spawner(user=non_admin_user)
+    s.start_timeout = 60
+    s.group_overrides = group_overrides
+    await s.apply_group_overrides()
+    assert s.start_timeout == 60

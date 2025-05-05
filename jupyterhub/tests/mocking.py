@@ -26,6 +26,7 @@ Other components
 - public_url
 
 """
+
 import asyncio
 import os
 import sys
@@ -35,6 +36,7 @@ from unittest import mock
 from urllib.parse import urlparse
 
 from pamela import PAMError
+from sqlalchemy import event
 from tornado.httputil import url_concat
 from traitlets import Bool, Dict, default
 
@@ -42,8 +44,8 @@ from .. import metrics, orm, roles
 from ..app import JupyterHub
 from ..auth import PAMAuthenticator
 from ..spawner import SimpleLocalProcessSpawner
-from ..utils import random_port, utcnow
-from .utils import async_requests, public_url, ssl_setup
+from ..utils import random_port, url_path_join, utcnow
+from .utils import AsyncSession, public_url, ssl_setup
 
 
 def mock_authenticate(username, password, service, encoding):
@@ -241,6 +243,15 @@ class MockHub(JupyterHub):
             cert_location = kwargs['internal_certs_location']
             kwargs['external_certs'] = ssl_setup(cert_location, 'hub-ca')
         super().__init__(*args, **kwargs)
+        if 'allow_all' not in self.config.Authenticator:
+            self.config.Authenticator.allow_all = True
+
+        if 'api_url' not in self.config.ConfigurableHTTPProxy:
+            proxy_port = random_port()
+            proxy_proto = "https" if self.internal_ssl else "http"
+            self.config.ConfigurableHTTPProxy.api_url = (
+                f"{proxy_proto}://127.0.0.1:{proxy_port}"
+            )
 
     @default('subdomain_host')
     def _subdomain_host_default(self):
@@ -252,7 +263,7 @@ class MockHub(JupyterHub):
             port = urlparse(self.subdomain_host).port
         else:
             port = random_port()
-        return 'http://127.0.0.1:%i/@/space%%20word/' % (port,)
+        return f'http://127.0.0.1:{port}/@/space%20word/'
 
     @default('ip')
     def _ip_default(self):
@@ -264,6 +275,10 @@ class MockHub(JupyterHub):
             port = urlparse(self.subdomain_host).port
             if port:
                 return port
+        return random_port()
+
+    @default('hub_port')
+    def _hub_port_default(self):
         return random_port()
 
     @default('authenticator_class')
@@ -307,6 +322,21 @@ class MockHub(JupyterHub):
             for role in self.db.query(orm.Role):
                 self.db.delete(role)
             self.db.commit()
+
+        # count db requests
+        self.db_query_count = 0
+        engine = self.db.get_bind()
+
+        @event.listens_for(engine, "before_execute")
+        def before_execute(conn, clauseelement, multiparams, params, execution_options):
+            self.db_query_count += 1
+
+    def init_logging(self):
+        super().init_logging()
+        # enable log propagation for pytest capture
+        self.log.propagate = True
+        # clear unneeded handlers
+        self.log.handlers.clear()
 
     async def initialize(self, argv=None):
         self.pid_file = NamedTemporaryFile(delete=False).name
@@ -355,29 +385,32 @@ class MockHub(JupyterHub):
     async def login_user(self, name):
         """Login a user by name, returning her cookies."""
         base_url = public_url(self)
-        external_ca = None
+        s = AsyncSession()
         if self.internal_ssl:
-            external_ca = self.external_certs['files']['ca']
+            s.verify = self.external_certs['files']['ca']
         login_url = base_url + 'hub/login'
-        r = await async_requests.get(login_url)
+        r = await s.get(login_url)
         r.raise_for_status()
         xsrf = r.cookies['_xsrf']
 
-        r = await async_requests.post(
+        r = await s.post(
             url_concat(login_url, {"_xsrf": xsrf}),
-            cookies=r.cookies,
             data={'username': name, 'password': name},
             allow_redirects=False,
-            verify=external_ca,
         )
         r.raise_for_status()
-        r.cookies["_xsrf"] = xsrf
-        assert sorted(r.cookies.keys()) == [
+        # make second request to get updated xsrf cookie
+        r2 = await s.get(
+            url_path_join(base_url, "hub/home"),
+            allow_redirects=False,
+        )
+        assert r2.status_code == 200
+        assert sorted(s.cookies.keys()) == [
             '_xsrf',
             'jupyterhub-hub-login',
             'jupyterhub-session-id',
         ]
-        return r.cookies
+        return s.cookies
 
 
 class InstrumentedSpawner(MockSpawner):

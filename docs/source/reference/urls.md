@@ -4,7 +4,7 @@
 
 This document describes how JupyterHub routes requests.
 
-This does not include the [REST API](using-jupyterhub-rest-api) URLs.
+This does not include the [REST API](howto:rest-api) URLs.
 
 In general, all URLs can be prefixed with `c.JupyterHub.base_url` to
 run the whole JupyterHub application on a prefix.
@@ -183,13 +183,6 @@ will send user `hortense` to `/user/hortense/notebooks/Index.ipynb`
 This will not work in general,
 unless you grant those users access to your server.
 
-**Contributions welcome:** The JupyterLab "shareable link" should share this link
-when run with JupyterHub, but it does not.
-See [jupyterlab-hub](https://github.com/jupyterhub/jupyterlab-hub)
-where this should probably be done and
-[this issue in JupyterLab](https://github.com/jupyterlab/jupyterlab/issues/5388)
-that is intended to make it possible.
-
 ## Spawning
 
 ### `/hub/spawn[/:username[/:servername]]`
@@ -240,7 +233,7 @@ and the page will show a link back to `/hub/spawn/...`.
 
 On this page, users can manage their JupyterHub API tokens.
 They can revoke access and request new tokens for writing scripts
-against the [JupyterHub REST API](using-jupyterhub-rest-api).
+against the [JupyterHub REST API](howto:rest-api).
 
 ## `/hub/admin`
 

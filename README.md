@@ -14,7 +14,6 @@
 [![Latest conda-forge version](https://img.shields.io/conda/vn/conda-forge/jupyterhub?logo=conda-forge)](https://anaconda.org/conda-forge/jupyterhub)
 [![Documentation build status](https://img.shields.io/readthedocs/jupyterhub?logo=read-the-docs)](https://jupyterhub.readthedocs.org/en/latest/)
 [![GitHub Workflow Status - Test](https://img.shields.io/github/workflow/status/jupyterhub/jupyterhub/Test?logo=github&label=tests)](https://github.com/jupyterhub/jupyterhub/actions)
-[![DockerHub build status](https://img.shields.io/docker/build/jupyterhub/jupyterhub?logo=docker&label=build)](https://hub.docker.com/r/jupyterhub/jupyterhub/tags)
 [![Test coverage of code](https://codecov.io/gh/jupyterhub/jupyterhub/branch/main/graph/badge.svg)](https://codecov.io/gh/jupyterhub/jupyterhub)
 [![GitHub](https://img.shields.io/badge/issue_tracking-github-blue?logo=github)](https://github.com/jupyterhub/jupyterhub/issues)
 [![Discourse](https://img.shields.io/badge/help_forum-discourse-blue?logo=discourse)](https://discourse.jupyter.org/c/jupyterhub)
@@ -57,7 +56,7 @@ for administration of the Hub and its users.
 ### Check prerequisites
 
 - A Linux/Unix based system
-- [Python](https://www.python.org/downloads/) 3.6 or greater
+- [Python](https://www.python.org/downloads/) 3.8 or greater
 - [nodejs/npm](https://www.npmjs.com/)
 
   - If you are using **`conda`**, the nodejs and npm dependencies will be installed for
@@ -112,7 +111,7 @@ Visit `http://localhost:8000` in your browser, and sign in with your system user
 
 _Note_: To allow multiple users to sign in to the server, you will need to
 run the `jupyterhub` command as a _privileged user_, such as root.
-The [wiki](https://github.com/jupyterhub/jupyterhub/wiki/Using-sudo-to-run-JupyterHub-without-root-privileges)
+The [documentation](https://jupyterhub.readthedocs.io/en/latest/howto/configuration/config-sudo.html)
 describes how to run the server as a _less privileged user_, which requires
 more configuration of the system.
 
@@ -160,10 +159,10 @@ To start the Hub on a specific url and port `10.0.1.2:443` with **https**:
 
 ## Docker
 
-A starter [**docker image for JupyterHub**](https://hub.docker.com/r/jupyterhub/jupyterhub/)
+A starter [**docker image for JupyterHub**](https://quay.io/repository/jupyterhub/jupyterhub)
 gives a baseline deployment of JupyterHub using Docker.
 
-**Important:** This `jupyterhub/jupyterhub` image contains only the Hub itself,
+**Important:** This `quay.io/jupyterhub/jupyterhub` image contains only the Hub itself,
 with no configuration. In general, one needs to make a derivative image, with
 at least a `jupyterhub_config.py` setting up an Authenticator and/or a Spawner.
 To run the single-user servers, which may be on the same system as the Hub or
@@ -171,7 +170,7 @@ not, Jupyter Notebook version 4 or greater must be installed.
 
 The JupyterHub docker image can be started with the following command:
 
-    docker run -p 8000:8000 -d --name jupyterhub jupyterhub/jupyterhub jupyterhub
+    docker run -p 8000:8000 -d --name jupyterhub quay.io/jupyterhub/jupyterhub jupyterhub
 
 This command will create a container named `jupyterhub` that you can
 **stop and resume** with `docker stop/start`.
@@ -221,7 +220,7 @@ docker container or Linux VM.
 We use a shared copyright model that enables all contributors to maintain the
 copyright on their contributions.
 
-All code is licensed under the terms of the [revised BSD license](./COPYING.md).
+All code is licensed under the terms of the [revised BSD license](./LICENSE).
 
 ## Help and resources
 

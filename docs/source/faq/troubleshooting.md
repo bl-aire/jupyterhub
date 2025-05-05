@@ -1,4 +1,4 @@
-(troubleshooting)=
+(faq:troubleshooting)=
 
 # Troubleshooting
 
@@ -46,13 +46,13 @@ things like inspect other users' servers or modify the user list at runtime).
 ### JupyterHub Docker container is not accessible at localhost
 
 Even though the command to start your Docker container exposes port 8000
-(`docker run -p 8000:8000 -d --name jupyterhub jupyterhub/jupyterhub jupyterhub`),
+(`docker run -p 8000:8000 -d --name jupyterhub quay.io/jupyterhub/jupyterhub jupyterhub`),
 it is possible that the IP address itself is not accessible/visible. As a result,
 when you try http://localhost:8000 in your browser, you are unable to connect
 even though the container is running properly. One workaround is to explicitly
 tell Jupyterhub to start at `0.0.0.0` which is visible to everyone. Try this
 command:
-`docker run -p 8000:8000 -d --name jupyterhub jupyterhub/jupyterhub jupyterhub --ip 0.0.0.0 --port 8000`
+`docker run -p 8000:8000 -d --name jupyterhub quay.io/jupyterhub/jupyterhub jupyterhub --ip 0.0.0.0 --port 8000`
 
 ### How can I kill ports from JupyterHub-managed services that have been orphaned?
 
@@ -167,7 +167,7 @@ When your whole JupyterHub sits behind an organization proxy (_not_ a reverse pr
 
 ### Launching Jupyter Notebooks to run as an externally managed JupyterHub service with the `jupyterhub-singleuser` command returns a `JUPYTERHUB_API_TOKEN` error
 
-[JupyterHub services](https://jupyterhub.readthedocs.io/en/stable/reference/services.html) allow processes to interact with JupyterHub's REST API. Example use-cases include:
+{ref}`services-reference` allow processes to interact with JupyterHub's REST API. Example use-cases include:
 
 - **Secure Testing**: provide a canonical Jupyter Notebook for testing production data to reduce the number of entry points into production systems.
 - **Grading Assignments**: provide access to shared Jupyter Notebooks that may be used for management tasks such as grading assignments.
@@ -197,6 +197,23 @@ With a docker container, pass in the environment variable with the run command:
       jupyter/datascience-notebook:latest
 
 [This example](https://github.com/jupyterhub/jupyterhub/tree/HEAD/examples/service-notebook/external) demonstrates how to combine the use of the `jupyterhub-singleuser` environment variables when launching a Notebook as an externally managed service.
+
+### Jupyter Notebook/Lab can be launched, but notebooks seem to hang when trying to execute a cell
+
+This often occurs when your browser is unable to open a websocket connection to a Jupyter kernel.
+
+#### Diagnose
+
+Open your browser console, e.g. [Chrome](https://developer.chrome.com/docs/devtools/console), [Firefox](https://firefox-source-docs.mozilla.org/devtools-user/web_console/).
+If you see errors related to opening websockets this is likely to be the problem.
+
+#### Solutions
+
+This could be caused by anything related to the network between your computer/browser and the server running JupyterHub, such as:
+
+- reverse proxies (see {ref}`howto:config:reverse-proxy` for example configurations)
+- anti-virus or firewalls running on your computer or JupyterHub server
+- transparent proxies running on your network
 
 ## How do I...?
 
@@ -259,17 +276,6 @@ the entire filesystem and set the default to the user's home directory.
     c.Spawner.notebook_dir = '/'
     c.Spawner.default_url = '/home/%U' # %U will be replaced with the username
 
-### How do I increase the number of pySpark executors on YARN?
-
-From the command line, pySpark executors can be configured using a command
-similar to this one:
-
-    pyspark --total-executor-cores 2 --executor-memory 1G
-
-[Cloudera documentation for configuring spark on YARN applications](https://www.cloudera.com/documentation/enterprise/latest/topics/cdh_ig_running_spark_on_yarn.html#spark_on_yarn_config_apps)
-provides additional information. The [pySpark configuration documentation](https://spark.apache.org/docs/0.9.0/configuration.html)
-is also helpful for programmatic configuration examples.
-
 ### How do I use JupyterLab's pre-release version with JupyterHub?
 
 While JupyterLab is still under active development, we have had users
@@ -299,6 +305,52 @@ notebook servers to default to JupyterLab:
 2. Configure the admin list to have workshop leaders listed with administrator privileges.
 
 Users will need a GitHub account to log in and be authenticated by the Hub.
+
+### I'm seeing "403 Forbidden XSRF cookie does not match POST" when users try to login
+
+During login, JupyterHub takes the request IP into account for CSRF protection.
+If proxies are not configured to properly set forwarded ips,
+JupyterHub will see all requests as coming from an internal ip,
+likely the ip of the proxy itself.
+You can see this in the JupyterHub logs, which log the ip address of requests.
+If most requests look like they are coming from a small number `10.0.x.x` or `172.16.x.x` ips, the proxy is not forwarding the true request ip properly.
+If the proxy has multiple replicas,
+then it is likely the ip may change from one request to the next,
+leading to this error during login:
+
+> 403 Forbidden XSRF cookie does not match POST argument
+
+The best way to fix this is to ensure your proxies set the forwarded headers, e.g. for nginx:
+
+```nginx
+proxy_set_header X-Real-IP $remote_addr;
+proxy_set_header Host $http_host;
+proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+```
+
+But if this is not available to you, you can instruct jupyterhub to ignore IPs from certain networks
+with the environment variable `$JUPYTERHUB_XSRF_ANONYMOUS_IP_CIDRS`.
+For example, to ignore the common [private networks](https://en.wikipedia.org/wiki/Private_network#Private_IPv4_addresses):
+
+```bash
+export JUPYTERHUB_XSRF_ANONYMOUS_IP_CIDRS="10.0.0.0/8;172.16.0.0/12;192.168.0.0/16"
+```
+
+The result will be that any request from an ip on one of these networks will be treated as coming from the same source.
+
+To totally disable taking the ip into consideration, set
+
+```bash
+export JUPYTERHUB_XSRF_ANONYMOUS_IP_CIDRS="0.0.0.0/0"
+```
+
+If your proxy sets its own headers to identify a browser origin, you can instruct JupyterHub to use those:
+
+```bash
+export JUPYTERHUB_XSRF_ANONYMOUS_ID_HEADERS="My-Custom-Header;User-Agent"
+```
+
+Again, these things are only used to compute the XSRF token used while a user is not logged in (i.e. during login itself).
 
 ### How do I set up rotating daily logs?
 
@@ -347,12 +399,12 @@ In order to resolve this issue, there are two potential options.
 
 ### Where do I find Docker images and Dockerfiles related to JupyterHub?
 
-Docker images can be found at the [JupyterHub organization on DockerHub](https://hub.docker.com/u/jupyterhub/).
-The Docker image [jupyterhub/singleuser](https://hub.docker.com/r/jupyterhub/singleuser/)
+Docker images can be found at the [JupyterHub organization on Quay.io](https://quay.io/organization/jupyterhub).
+The Docker image [jupyterhub/singleuser](https://quay.io/repository/jupyterhub/singleuser)
 provides an example single-user notebook server for use with DockerSpawner.
 
 Additional single-user notebook server images can be found at the [Jupyter
-organization on DockerHub](https://hub.docker.com/r/jupyter/) and information
+organization on Quay.io](https://quay.io/organization/jupyter) and information
 about each image at the [jupyter/docker-stacks repo](https://github.com/jupyter/docker-stacks).
 
 ### How can I view the logs for JupyterHub or the user's Notebook servers when using the DockerSpawner?

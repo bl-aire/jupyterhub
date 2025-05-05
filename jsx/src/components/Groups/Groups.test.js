@@ -1,10 +1,9 @@
-import React from "react";
+import React, { act } from "react";
 import "@testing-library/jest-dom";
-import { act } from "react-dom/test-utils";
 import { render, screen, fireEvent } from "@testing-library/react";
-import { Provider, useDispatch, useSelector } from "react-redux";
+import { Provider, useSelector } from "react-redux";
 import { createStore } from "redux";
-import { HashRouter } from "react-router-dom";
+import { HashRouter, useSearchParams } from "react-router";
 // eslint-disable-next-line
 import regeneratorRuntime from "regenerator-runtime";
 
@@ -16,13 +15,18 @@ jest.mock("react-redux", () => ({
   useSelector: jest.fn(),
 }));
 
+jest.mock("react-router", () => ({
+  ...jest.requireActual("react-router"),
+  useSearchParams: jest.fn(),
+}));
+
 var mockAsync = () =>
   jest.fn().mockImplementation(() => Promise.resolve({ key: "value" }));
 
 var groupsJsx = (callbackSpy) => (
   <Provider store={createStore(mockReducers, mockAppState())}>
     <HashRouter>
-      <Groups location={{ search: "0" }} updateGroups={callbackSpy} />
+      <Groups updateGroups={callbackSpy} />
     </HashRouter>
   </Provider>
 );
@@ -50,27 +54,48 @@ var mockAppState = () =>
       offset: 0,
       limit: 2,
       total: 4,
-      next: {
-        offset: 2,
-        limit: 2,
-        url: "http://localhost:8000/hub/api/groups?offset=2&limit=2",
-      },
     },
   });
+
+var mockUpdateGroups = () => {
+  const state = mockAppState();
+  return jest.fn().mockImplementation((offset, limit) =>
+    Promise.resolve({
+      items: state.groups_data.slice(0, limit),
+      _pagination: {
+        offset: offset,
+        limit: limit || 2,
+        total: state.groups_page.total,
+      },
+    }),
+  );
+};
+
+let searchParams = new URLSearchParams();
 
 beforeEach(() => {
   useSelector.mockImplementation((callback) => {
     return callback(mockAppState());
   });
+  searchParams = new URLSearchParams();
+  searchParams.set("limit", "2");
+  useSearchParams.mockImplementation(() => [
+    searchParams,
+    (callback) => {
+      searchParams = callback(searchParams);
+    },
+  ]);
 });
 
 afterEach(() => {
   useSelector.mockClear();
   mockReducers.mockClear();
+  useSearchParams.mockClear();
+  jest.runAllTimers();
 });
 
 test("Renders", async () => {
-  let callbackSpy = mockAsync();
+  let callbackSpy = mockUpdateGroups();
 
   await act(async () => {
     render(groupsJsx(callbackSpy));
@@ -80,7 +105,7 @@ test("Renders", async () => {
 });
 
 test("Renders groups_data prop into links", async () => {
-  let callbackSpy = mockAsync();
+  let callbackSpy = mockUpdateGroups();
 
   await act(async () => {
     render(groupsJsx(callbackSpy));
@@ -98,7 +123,7 @@ test("Renders nothing if required data is not available", async () => {
     return callback({});
   });
 
-  let callbackSpy = mockAsync();
+  let callbackSpy = mockUpdateGroups();
 
   await act(async () => {
     render(groupsJsx(callbackSpy));
@@ -108,29 +133,25 @@ test("Renders nothing if required data is not available", async () => {
   expect(noShow).toBeVisible();
 });
 
-test("Interacting with PaginationFooter causes state update and refresh via useEffect call", async () => {
-  let callbackSpy = mockAsync();
-
+test("Interacting with PaginationFooter causes page refresh", async () => {
+  let updateGroupsSpy = mockUpdateGroups();
   await act(async () => {
-    render(groupsJsx(callbackSpy));
+    render(groupsJsx(updateGroupsSpy));
   });
 
-  expect(callbackSpy).toBeCalledWith(0, 2);
+  expect(updateGroupsSpy).toBeCalledWith(0, 2);
 
   var lastState =
     mockReducers.mock.results[mockReducers.mock.results.length - 1].value;
   expect(lastState.groups_page.offset).toEqual(0);
   expect(lastState.groups_page.limit).toEqual(2);
+  expect(searchParams.get("offset")).toEqual(null);
 
   let next = screen.getByTestId("paginate-next");
-  fireEvent.click(next);
-
-  lastState =
-    mockReducers.mock.results[mockReducers.mock.results.length - 1].value;
-  expect(lastState.groups_page.offset).toEqual(2);
-  expect(lastState.groups_page.limit).toEqual(2);
-
-  // FIXME: mocked useSelector, state seem to prevent updateGroups from being called
-  // making the test environment not representative
-  // expect(callbackSpy).toHaveBeenCalledWith(2, 2);
+  await act(async () => {
+    await fireEvent.click(next);
+  });
+  expect(searchParams.get("offset")).toEqual("2");
+  // FIXME: useSelector mocks prevent updateGroups from being called
+  // expect(updateGroupsSpy).toBeCalledWith(2, 2);
 });

@@ -1,7 +1,9 @@
 """Group handlers"""
+
 # Copyright (c) Jupyter Development Team.
 # Distributed under the terms of the Modified BSD License.
 import json
+from warnings import warn
 
 from tornado import web
 
@@ -18,7 +20,7 @@ class _GroupAPIHandler(APIHandler):
             username = self.authenticator.normalize_username(username)
             user = self.find_user(username)
             if user is None:
-                raise web.HTTPError(400, "No such user: %s" % username)
+                raise web.HTTPError(400, f"No such user: {username}")
             users.append(user.orm_user)
         return users
 
@@ -34,6 +36,11 @@ class _GroupAPIHandler(APIHandler):
 
     def check_authenticator_managed_groups(self):
         """Raise error on group-management APIs if Authenticator is managing groups"""
+        warn(
+            "check_authenticator_managed_groups is deprecated in JupyterHub 5.3.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if self.authenticator.manage_groups:
             raise web.HTTPError(400, "Group management via API is disabled")
 
@@ -72,9 +79,6 @@ class GroupListAPIHandler(_GroupAPIHandler):
     @needs_scope('admin:groups')
     async def post(self):
         """POST creates Multiple groups"""
-
-        self.check_authenticator_managed_groups()
-
         model = self.get_json_body()
         if not model or not isinstance(model, dict) or not model.get('groups'):
             raise web.HTTPError(400, "Must specify at least one group to create")
@@ -86,7 +90,7 @@ class GroupListAPIHandler(_GroupAPIHandler):
         for name in groupnames:
             existing = orm.Group.find(self.db, name=name)
             if existing is not None:
-                raise web.HTTPError(409, "Group %s already exists" % name)
+                raise web.HTTPError(409, f"Group {name} already exists")
 
             usernames = model.get('users', [])
             # check that users exist
@@ -114,7 +118,6 @@ class GroupAPIHandler(_GroupAPIHandler):
     @needs_scope('admin:groups')
     async def post(self, group_name):
         """POST creates a group by name"""
-        self.check_authenticator_managed_groups()
         model = self.get_json_body()
         if model is None:
             model = {}
@@ -123,7 +126,7 @@ class GroupAPIHandler(_GroupAPIHandler):
 
         existing = orm.Group.find(self.db, name=group_name)
         if existing is not None:
-            raise web.HTTPError(409, "Group %s already exists" % group_name)
+            raise web.HTTPError(409, f"Group {group_name} already exists")
 
         usernames = model.get('users', [])
         # check that users exist
@@ -142,7 +145,6 @@ class GroupAPIHandler(_GroupAPIHandler):
     @needs_scope('delete:groups')
     def delete(self, group_name):
         """Delete a group by name"""
-        self.check_authenticator_managed_groups()
         group = self.find_group(group_name)
         self.log.info("Deleting group %s", group_name)
         self.db.delete(group)
@@ -156,7 +158,6 @@ class GroupUsersAPIHandler(_GroupAPIHandler):
     @needs_scope('groups')
     def post(self, group_name):
         """POST adds users to a group"""
-        self.check_authenticator_managed_groups()
         group = self.find_group(group_name)
         data = self.get_json_body()
         self._check_group_model(data)
@@ -175,7 +176,6 @@ class GroupUsersAPIHandler(_GroupAPIHandler):
     @needs_scope('groups')
     async def delete(self, group_name):
         """DELETE removes users from a group"""
-        self.check_authenticator_managed_groups()
         group = self.find_group(group_name)
         data = self.get_json_body()
         self._check_group_model(data)
